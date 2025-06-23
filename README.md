@@ -12,3 +12,7 @@
   ```
 
 -> The model loader automatically downloads the required files.
+
+
+Credits / Original Repo:  
+https://github.com/Cypress-Yang/SongBloom
