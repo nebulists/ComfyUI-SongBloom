@@ -212,7 +212,7 @@ class SongBloomGenerate:
             },
             "optional": {
                 "cfg_coef": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1}),
-                "temperature": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.1}),
+                "temperature": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.5, "step": 0.01}),
                 "steps": ("INT", {"default": 36, "min": 1, "max": 200, "step": 1}),
                 "dit_cfg_type": (["h", "m", "l"], {"default": "h"}),
                 "use_sampling": ("BOOLEAN", {"default": True}),
