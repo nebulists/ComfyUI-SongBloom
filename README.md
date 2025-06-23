@@ -9,3 +9,6 @@
 2. Install dependencies(For portable use python embeded):
   ```
   pip install -r requirements.txt
+  ```
+
+-> The model loader automatically downloads the required files.
