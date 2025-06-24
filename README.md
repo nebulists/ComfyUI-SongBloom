@@ -11,7 +11,8 @@
   pip install -r requirements.txt
   ```
 
--> The model loader automatically downloads the required files.
+# Safetensor files
+https://huggingface.co/fredconex/SongBloom-safetensors/tree/main
 
 
 Credits / Original Repo:  
