@@ -10,7 +10,6 @@ import numpy as np
 from typing import Tuple, Dict, Any, Optional
 import folder_paths
 from omegaconf import OmegaConf, DictConfig
-from safetensors.torch import load_file as safetensors_load_file
 
 # Disable flash attention for compatibility
 os.environ['DISABLE_FLASH_ATTN'] = "1"
@@ -50,11 +49,9 @@ def register_omegaconf_resolvers(cache_dir: str):
 
 try:
     from .SongBloom.models.songbloom.songbloom_pl import SongBloom_Sampler
-    from .SongBloom.g2p.lyric_common import key2processor
 except ImportError as e:
     print(f"Warning: Could not import SongBloom: {e}")
     SongBloom_Sampler = None
-    key2processor = {}
     symbols = []
     LABELS = {}
 
@@ -183,15 +180,8 @@ class SongBloomGenerate:
     FUNCTION = "generate"
     CATEGORY = "audio/songbloom"
     OUTPUT_NODE = True    
-    
-    _model_cache = None
-    _cache_key = None
 
     def _get_model(self, model_config, vae):
-        # Build a cache key based on config and vae id
-        cache_key = (id(vae), id(model_config['cfg']), model_config['safetensor_path'], model_config['dtype'])
-        if SongBloomGenerate._model_cache is not None and SongBloomGenerate._cache_key == cache_key:
-            return SongBloomGenerate._model_cache
         # Build the model
         if SongBloom_Sampler is None:
             raise RuntimeError("SongBloom package not found. Please ensure it's installed in the node directory.")
@@ -209,8 +199,6 @@ class SongBloomGenerate:
         model.prompt_duration = cfg.sr * prompt_len
         if hasattr(cfg, 'inference') and cfg.inference:
             model.set_generation_params(**cfg.inference)
-        SongBloomGenerate._model_cache = model
-        SongBloomGenerate._cache_key = cache_key
         return model
 
     def generate(self, model_config: dict, vae: object, lyrics: str, audio: dict, 
