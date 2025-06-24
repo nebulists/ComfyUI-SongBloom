@@ -10,7 +10,7 @@ import numpy as np
 from typing import Tuple, Dict, Any, Optional
 import folder_paths
 from omegaconf import OmegaConf, DictConfig
-from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file as safetensors_load_file
 
 # Disable flash attention for compatibility
 os.environ['DISABLE_FLASH_ATTN'] = "1"
@@ -58,143 +58,98 @@ except ImportError as e:
     symbols = []
     LABELS = {}
 
+# Helper to wrap a raw SongBloom model into the expected dict format
+
+def wrap_songbloom_model(model):
+    # If already a dict, return as is
+    if isinstance(model, dict) and "model" in model:
+        return model
+    # If it's a SongBloom_Sampler or SongBloom_PL, wrap it
+    # Try to extract metadata, fallback to defaults if missing
+    sample_rate = getattr(model, "sample_rate", 48000)
+    frame_rate = getattr(model, "frame_rate", 25)
+    max_duration = getattr(model, "max_duration", 30.0)
+    dtype = getattr(model, "dtype", torch.float32)
+    lyric_processor_key = getattr(model, "lyric_processor_key", "phoneme")
+    return {
+        "model": model,
+        "sample_rate": sample_rate,
+        "frame_rate": frame_rate,
+        "max_duration": max_duration,
+        "dtype": dtype,
+        "lyric_processor_key": lyric_processor_key,
+    }
+
 class SongBloomModelLoader:
     """
-    Node to load SongBloom model and VAE
+    Node to load SongBloom model config and checkpoint path only (no VAE, no model instantiation)
     """
     
+    @staticmethod
+    def _list_safetensors():
+        """List available .safetensors files in the checkpoints directory."""
+        checkpoints_dir = os.path.join(folder_paths.models_dir, "checkpoints")
+        if not os.path.exists(checkpoints_dir):
+            return []
+        return [f for f in os.listdir(checkpoints_dir) if f.endswith('.safetensors')]
+
     @classmethod
     def INPUT_TYPES(cls):
+        safetensor_files = cls._list_safetensors()
+        safetensor_files = safetensor_files if safetensor_files else ["None found"]
         return {
             "required": {
+                "checkpoint": (safetensor_files, {"default": safetensor_files[0], "tooltip": "Pick a .safetensors checkpoint from models/checkpoints."}),
                 "dtype": (["float32", "bfloat16"], {"default": "bfloat16"}),
+                "prompt_len": ("INT", {"default": 10, "min": 1, "max": 60, "step": 1}),
             },
             "optional": {
                 "lyric_processor": (["pinyin", "phoneme", "none"], {"default": "phoneme"}),
             }
         }
     
-    RETURN_TYPES = ("SONGBLOOM_MODEL",)
-    RETURN_NAMES = ("model",)
-    FUNCTION = "load_model"
+    RETURN_TYPES = ("SONGBLOOM_MODEL_CONFIG",)
+    RETURN_NAMES = ("model_config",)
+    FUNCTION = "load_model_config"
     CATEGORY = "audio/songbloom"
     
     def __init__(self):
         self.cache_dir = os.path.join(folder_paths.models_dir , "songbloom")
         os.makedirs(self.cache_dir, exist_ok=True)
     
-    def hf_download(self, repo_id: str, model_name: str, force_redownload: bool = False):
-        """Download model files from Hugging Face Hub with progress bars"""
-        
-        download_kwargs = {"force_download": force_redownload} if force_redownload else {}
-        
-        # File list with descriptions for better progress tracking
-        files_to_download = [
-            (f"{model_name}.yaml", "Model config"),
-            (f"{model_name}.pt", "Model checkpoint"),
-            ("stable_audio_1920_vae.json", "VAE config"),
-            ("autoencoder_music_dsp1920.ckpt", "VAE checkpoint"),
-            ("vocab_g2p.yaml", "G2P vocabulary")
-        ]
-        
-        downloaded_paths = []
-        
-        try:
-            print(f"Downloading model files from {repo_id}...")
-            
-            pbar = ProgressBar(len(files_to_download))
-            for filename, description in files_to_download:
-                print(f"\nDownloading {description}: {filename}")
-                
-                path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    local_dir=self.cache_dir,
-                    **download_kwargs
-                )
-                
-                downloaded_paths.append(path)
-                pbar.update(1)
-            
-            print(f"\n All files downloaded successfully to {self.cache_dir}")
-            return tuple(downloaded_paths)
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to download model files: {e}")
-    
     def load_config(self, cfg_file: str) -> DictConfig:
         """Load configuration file with resolvers"""
-        # Register resolvers globally
         register_omegaconf_resolvers(self.cache_dir)
-        
-        # Load the raw YAML first
         raw_cfg = OmegaConf.load(open(cfg_file, 'r'))
-        
-        # Print the raw configuration to see unresolved values
-        #print("Raw YAML configuration (before resolver processing):")
-        #print(OmegaConf.to_yaml(raw_cfg))
-        
         return raw_cfg
     
-    def load_model(self, dtype: str, lyric_processor: str = "phoneme"):
-        """Load SongBloom model"""
-        if SongBloom_Sampler is None:
-            raise RuntimeError("SongBloom package not found. Please ensure it's installed in the node directory.")
-        
+    def load_model_config(self, dtype: str, checkpoint: str, lyric_processor: str = "phoneme", prompt_len: int = 10, **kwargs):
         try:
-            # Download model files
-            print(f"Downloading SongBloom model: {model_name}")
-            cfg_path, ckpt_path, vae_cfg_path, vae_ckpt_path, g2p_path = self.hf_download(
-                repo_id, model_name
-            )
-            
-            # Load configuration
+            print(f"Preparing to load SongBloom model config: {model_name}")
+            # All files are local now
+            # Assume config files are in SongBloom/config/
+            config_dir = os.path.join(os.path.dirname(__file__), "SongBloom", "config")
+            cfg_path = os.path.join(config_dir, f"{model_name}.yaml")
+            vae_cfg_path = os.path.join(config_dir, "stable_audio_1920_vae.json")
+            g2p_path = os.path.join(config_dir, "vocab_g2p.yaml")
+            model_safetensor = os.path.join(folder_paths.models_dir, "checkpoints", checkpoint)
+            safetensor_path = model_safetensor
             cfg = self.load_config(cfg_path)
-            
-            # Override lyric processor in config if specified
             if hasattr(cfg, 'train_dataset'):
                 cfg.train_dataset.lyric_processor = lyric_processor
-                print(f"Set lyric processor to: {lyric_processor}")
-            
-            # Print the loaded YAML configuration
-            #print("Loaded YAML configuration:")
-            #print(OmegaConf.to_yaml(cfg))
-            
-            # Set dtype
-            torch_dtype = torch.float32 if dtype == 'float32' else torch.bfloat16
-            
-            # Build model
-            print("Loading SongBloom model...")
-            model = SongBloom_Sampler.build_from_trainer(cfg, strict=True, dtype=torch_dtype)
-            
-            # Set generation parameters from config
-            if hasattr(cfg, 'inference') and cfg.inference:
-                model.set_generation_params(**cfg.inference)
-            
-            # Verify lyric processor is working
-            print(f"Lyric processor key: {model.lyric_processor_key}")
-            print(f"Available processors: {list(key2processor.keys())}")
-            
-            print(f"SongBloom model loaded successfully. Sample rate: {model.sample_rate}")
-            
-            # Store model info for the generation node
-            model_info = {
-                "model": model,
-                "sample_rate": model.sample_rate,
-                "frame_rate": model.frame_rate,
-                "max_duration": model.max_duration,
-                "dtype": torch_dtype,
-                "lyric_processor_key": model.lyric_processor_key
+            model_config = {
+                "cfg": cfg,
+                "vae_cfg_path": vae_cfg_path,
+                "g2p_path": g2p_path,
+                "safetensor_path": safetensor_path,
+                "dtype": dtype,
+                "prompt_len": prompt_len
             }
-
-            print(model_info)
-            
-            return (model_info,)
-            
+            return (model_config,)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            raise RuntimeError(f"Failed to load SongBloom model: {e}")
+            raise RuntimeError(f"Failed to load SongBloom model config: {e}")
 
 
 class SongBloomGenerate:
@@ -206,7 +161,8 @@ class SongBloomGenerate:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("SONGBLOOM_MODEL",),
+                "model_config": ("SONGBLOOM_MODEL_CONFIG",),
+                "vae": ("VAE",),
                 "lyrics": ("STRING", {"multiline": True, "default": "Hello world, this is a test song"}),
                 "audio": ("AUDIO",),
             },
@@ -228,62 +184,85 @@ class SongBloomGenerate:
     CATEGORY = "audio/songbloom"
     OUTPUT_NODE = True    
     
-    def generate(self, model: Dict[str, Any], lyrics: str, audio: Dict[str, torch.Tensor], 
+    _model_cache = None
+    _cache_key = None
+
+    def _get_model(self, model_config, vae):
+        # Build a cache key based on config and vae id
+        cache_key = (id(vae), id(model_config['cfg']), model_config['safetensor_path'], model_config['dtype'])
+        if SongBloomGenerate._model_cache is not None and SongBloomGenerate._cache_key == cache_key:
+            return SongBloomGenerate._model_cache
+        # Build the model
+        if SongBloom_Sampler is None:
+            raise RuntimeError("SongBloom package not found. Please ensure it's installed in the node directory.")
+        cfg = model_config['cfg']
+        safetensor_path = model_config['safetensor_path']
+        dtype = model_config['dtype']
+        prompt_len = model_config.get('prompt_len', 10)
+        if dtype == 'float32':
+            torch_dtype = torch.float32
+        elif dtype == 'bfloat16':
+            torch_dtype = torch.bfloat16
+        else:
+            torch_dtype = torch.float32
+        model = SongBloom_Sampler.build_from_trainer(cfg, vae=vae, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path, external_vae=True)
+        model.prompt_duration = cfg.sr * prompt_len
+        if hasattr(cfg, 'inference') and cfg.inference:
+            model.set_generation_params(**cfg.inference)
+        SongBloomGenerate._model_cache = model
+        SongBloomGenerate._cache_key = cache_key
+        return model
+
+    def generate(self, model_config: dict, vae: object, lyrics: str, audio: dict, 
                 cfg_coef: float = 1.5, temperature: float = 0.9, steps: int = 50, dit_cfg_type: str = "h", 
                 use_sampling: bool = True, top_k: int = 200, max_duration: float = 30.0, 
                 seed: int = -1):
         """Generate music using SongBloom"""
-        
         try:
-            print("Model keys:", model.keys())
-            print("Model 'model' type:", type(model.get("model")))
-
-            songbloom_model = model["model"]
-            model_sample_rate = model["sample_rate"]
-            model_dtype = model["dtype"]
-            
+            model = self._get_model(model_config, vae)
+            print("Model type:", type(model))
+            model_sample_rate = model.sample_rate
+            # Use dtype from model_config, not from VAE
+            dtype = model_config.get('dtype', 'float32')
+            if dtype == 'float32':
+                model_dtype = torch.float32
+            elif dtype == 'bfloat16':
+                model_dtype = torch.bfloat16
+            else:
+                model_dtype = torch.float32
             # Set random seed if specified
             if seed != -1:
                 torch.manual_seed(seed)
                 np.random.seed(seed)
-            
             lyrics = lyrics.replace('\r', ' ').replace('\n', ' , ').lower()
-            processed_lyrics = songbloom_model._process_lyric(lyrics)
-                        
+            processed_lyrics = model._process_lyric(lyrics)
             # Process input audio and prepare attributes
             waveform = audio["waveform"]  # Shape: [batch, channels, samples]
             sample_rate = audio["sample_rate"]
-            
             # Take first item from batch and convert to model's expected format
             prompt_wav = waveform[0]  # Shape: [channels, samples]
-            
             # Resample if necessary
             if sample_rate != model_sample_rate:
                 prompt_wav = torchaudio.functional.resample(
                     prompt_wav, sample_rate, model_sample_rate
                 )
-            
             # Convert to mono if stereo
             if prompt_wav.shape[0] > 1:
                 prompt_wav = prompt_wav.mean(dim=0, keepdim=True)
-            
-            # Convert to model dtype
+            # Convert to correct dtype from loader
             prompt_wav = prompt_wav.to(dtype=model_dtype)
-            
             # Limit prompt duration (10 seconds max as in original code)
-            max_prompt_samples = 10 * model_sample_rate
+            max_prompt_samples = model.prompt_duration
+            print(f"\nprompt limit: {max_prompt_samples}")
             if prompt_wav.shape[-1] > max_prompt_samples:
                 prompt_wav = prompt_wav[..., :max_prompt_samples]
-            
             # Prepare attributes for generation
-            attributes, _ = songbloom_model._prepare_tokens_and_attributes(
+            attributes, _ = model._prepare_tokens_and_attributes(
                 conditions={"lyrics": [processed_lyrics], "prompt_wav": [prompt_wav]}, 
                 prompt=None, prompt_tokens=None
             )
-            
             # Set generation parameters
-            max_frames = int(max_duration * songbloom_model.frame_rate)
-
+            max_frames = int(max_duration * model.frame_rate)
             generation_params = {
                 "cfg_coef": cfg_coef,
                 "temp": temperature,
@@ -296,31 +275,21 @@ class SongBloomGenerate:
                 "use_sampling": use_sampling,
                 "max_frames": max_frames
             }
-            
-            songbloom_model.set_generation_params(**generation_params)
-            
+            model.set_generation_params(**generation_params)
             print(f"Generating music with processed lyrics: {processed_lyrics[:50]}...")
             print(f"Prompt audio shape: {prompt_wav.shape}, Sample rate: {model_sample_rate}")
             print(f"Generation params: {generation_params}")
-            
             # Generate music - get latent representation only
             with torch.no_grad():
-                latent_seq, token_seq = songbloom_model.diffusion.generate(None, attributes, **generation_params)
-            
+                latent_seq, token_seq = model.diffusion.generate(None, attributes, **generation_params)
             # Convert latent to ComfyUI LATENT format
-            # latent_seq is expected to be [batch, channels, time]
             if latent_seq.dim() == 2:
                 latent_seq = latent_seq.unsqueeze(0)  # Add batch dimension
-            
             print(f"Generated latent shape: {latent_seq.shape}")
-            
-            # ComfyUI LATENT format expects a dictionary with "samples" key
             output_latent = {
                 "samples": latent_seq.float().cpu()
             }
-            
             return (output_latent,)
-            
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -336,7 +305,7 @@ class SongBloomDecoder:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("SONGBLOOM_MODEL",),
+                "model": ("VAE",),
                 "latent": ("LATENT",),
             },
             "optional": {
@@ -350,97 +319,75 @@ class SongBloomDecoder:
     FUNCTION = "decode"
     CATEGORY = "audio/songbloom"
     
-    def decode(self, model: Dict[str, Any], latent: Dict[str, torch.Tensor], 
+    def decode(self, model: Any, latent: Dict[str, torch.Tensor], 
                chunk_size: int = 100, overlap: int = 0):
         """Decode latent representation to audio using chunked processing"""
-        
         try:
-            songbloom_model = model["model"]
-            model_sample_rate = model["sample_rate"]
-            
+            # model is a StableVAE instance
+            vae_model = model  # No wrapping needed
+            # Assume sample_rate is stored in the VAE or passed in
+            model_sample_rate = getattr(vae_model, "sr", 48000)
+
             # Get latent samples
             latent_samples = latent["samples"]  # Shape: [batch, channels, time]
-            
+
             # Move to model device and dtype
-            device = next(iter(songbloom_model.diffusion.parameters())).device
-            latent_samples = latent_samples.to(device=device, dtype=model["dtype"])
-            
+            device = next(vae_model.parameters()).device
+            vae_dtype = next(vae_model.parameters()).dtype
+            latent_samples = latent_samples.to(device=device, dtype=vae_dtype)
+
             batch_size, channels, time_frames = latent_samples.shape
-            
+
             print(f"Decoding latent shape: {latent_samples.shape} using chunks of size {chunk_size} with overlap {overlap}")
-            
-            # Validate parameters
+
             if overlap >= chunk_size:
                 overlap = chunk_size // 2
                 print(f"Warning: overlap too large, reduced to {overlap}")
-            
-            # If the sequence is short enough, decode without chunking
+
             if time_frames <= chunk_size:
                 print("Sequence short enough, decoding without chunking")
                 with torch.no_grad():
-                    decoded_audio = songbloom_model.compression_model.decode(latent_samples)
+                    decoded_audio = vae_model.decode(latent_samples)
             else:
-                # Chunked decoding
                 decoded_chunks = []
                 step_size = chunk_size - overlap
-                
+
                 for start_idx in range(0, time_frames, step_size):
                     end_idx = min(start_idx + chunk_size, time_frames)
-                    
                     print(f"Decoding chunk {start_idx}:{end_idx} ({end_idx - start_idx} frames)")
-                    
-                    # Extract chunk
                     chunk_latent = latent_samples[:, :, start_idx:end_idx]
-                    
-                    # Decode chunk
                     with torch.no_grad():
-                        chunk_audio = songbloom_model.compression_model.decode(chunk_latent)
-                    
-                    # Handle overlapping regions
+                        chunk_audio = vae_model.decode(chunk_latent)
                     if start_idx == 0:
-                        # First chunk - keep everything
                         decoded_chunks.append(chunk_audio)
                     else:
-                        # Subsequent chunks - remove overlap from beginning
-                        # Calculate overlap in audio samples
                         audio_overlap_samples = self._calculate_audio_overlap(
                             overlap, chunk_audio.shape[-1], chunk_size
                         )
-                        
                         if audio_overlap_samples > 0 and chunk_audio.shape[-1] > audio_overlap_samples:
                             chunk_audio = chunk_audio[:, :, audio_overlap_samples:]
-                        
                         decoded_chunks.append(chunk_audio)
-                    
-                    # Clear GPU memory
                     del chunk_audio
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                
-                # Concatenate all chunks
+
                 print(f"Concatenating {len(decoded_chunks)} decoded chunks")
                 decoded_audio = torch.cat(decoded_chunks, dim=-1)
-                
-                # Clean up
                 del decoded_chunks
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
-            # Convert output to ComfyUI audio format
-            # decoded_audio is expected to be [batch, channels, samples]
+
             if decoded_audio.dim() == 2:
                 decoded_audio = decoded_audio.unsqueeze(0)  # Add batch dimension
-            
-            # Ensure float32 for ComfyUI compatibility
+
             decoded_audio = decoded_audio.float().cpu()
-            
             print(f"Final decoded audio shape: {decoded_audio.shape}")
-            
+
             output_audio = {
                 "waveform": decoded_audio,
                 "sample_rate": model_sample_rate
             }
-            
+
             return (output_audio,)
-            
+
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -456,15 +403,56 @@ class SongBloomDecoder:
         return 0
 
 
+class SongBloomVAELoader:
+    """
+    Node to load SongBloom VAE from safetensors file in ComfyUI/models/vae
+    """
+    
+    @staticmethod
+    def _list_safetensors():
+        vae_dir = os.path.join(folder_paths.models_dir, "vae")
+        if not os.path.exists(vae_dir):
+            return []
+        return [f for f in os.listdir(vae_dir) if f.endswith('.safetensors')]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        safetensor_files = cls._list_safetensors()
+        safetensor_files = safetensor_files if safetensor_files else ["None found"]
+        return {
+            "required": {
+                "vae_file": (safetensor_files, {"default": safetensor_files[0], "tooltip": "Pick a .safetensors VAE from models/vae."}),
+            }
+        }
+
+    RETURN_TYPES = ("VAE",)
+    RETURN_NAMES = ("vae",)
+    FUNCTION = "load_vae"
+    CATEGORY = "audio/songbloom"
+
+    def load_vae(self, vae_file: str):
+        try:
+            from .SongBloom.models.vae_frontend import StableVAE
+        except ImportError as e:
+            raise RuntimeError(f"Could not import SongBloom VAE code: {e}")
+        vae_dir = os.path.join(folder_paths.models_dir, "vae")
+        vae_path = os.path.join(vae_dir, vae_file)
+        config_path = os.path.join(os.path.dirname(__file__), "SongBloom", "config", "stable_audio_1920_vae.json")
+        vae = StableVAE(vae_ckpt=None, vae_cfg=config_path, sr=48000, vae_safetensor_path=vae_path)
+        return (vae,)
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "SongBloomModelLoader": SongBloomModelLoader,
     "SongBloomGenerate": SongBloomGenerate,
     "SongBloomDecoder": SongBloomDecoder,
+    "SongBloomVAELoader": SongBloomVAELoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SongBloomModelLoader": "SongBloom Model Loader",
+    "SongBloomModelLoader": "SongBloom Model Config Loader",
     "SongBloomGenerate": "SongBloom Generate",
     "SongBloomDecoder": "SongBloom Decoder",
+    "SongBloomVAELoader": "SongBloom VAE Loader",
 }

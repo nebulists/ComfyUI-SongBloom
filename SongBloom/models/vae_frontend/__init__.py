@@ -4,6 +4,8 @@ import typing as tp
 import torchaudio
 import einops
 from abc import ABC, abstractmethod
+from .autoencoders import create_autoencoder_from_config, AudioAutoencoder
+from safetensors.torch import load_file as safetensors_load_file
 
 
 class AbstractVAE(ABC, nn.Module):
@@ -42,15 +44,19 @@ class AbstractVAE(ABC, nn.Module):
         ...
 
 
-from .autoencoders import create_autoencoder_from_config, AudioAutoencoder
 class StableVAE(AbstractVAE):
-    def __init__(self, vae_ckpt, vae_cfg, sr=48000) -> None:
+    def __init__(self, vae_ckpt, vae_cfg, sr=48000, vae_safetensor_path=None) -> None:
         super().__init__()
         import json
         with open(vae_cfg) as f:
             config = json.load(f)
         self.vae: AudioAutoencoder = create_autoencoder_from_config(config)
-        self.vae.load_state_dict(torch.load(vae_ckpt)['state_dict'])
+        if vae_safetensor_path is not None:
+            print(f"Loading VAE weights from safetensor: {vae_safetensor_path}")
+            state_dict = safetensors_load_file(vae_safetensor_path, device='cpu')
+            self.vae.load_state_dict(state_dict)
+        else:
+            self.vae.load_state_dict(torch.load(vae_ckpt)['state_dict'])
         self.sample_rate = sr
         self.rsp48k = torchaudio.transforms.Resample(sr, self.orig_sample_rate) if sr != self.orig_sample_rate else nn.Identity()
        
