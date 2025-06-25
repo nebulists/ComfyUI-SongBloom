@@ -11,6 +11,13 @@ from typing import Tuple, Dict, Any, Optional
 import folder_paths
 from omegaconf import OmegaConf, DictConfig
 
+# Import ComfyUI interruption exception
+try:
+    from comfy.model_management import InterruptProcessingException
+except ImportError:
+    # Fallback if not available
+    InterruptProcessingException = Exception
+
 # Disable flash attention for compatibility
 os.environ['DISABLE_FLASH_ATTN'] = "1"
 repo_id = "CypressYang/SongBloom"
@@ -154,6 +161,9 @@ class SongBloomGenerate:
     Node to generate music using SongBloom model
     """
     
+    # Class-level cache to store loaded models
+    _model_cache = {}
+    
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -167,11 +177,11 @@ class SongBloomGenerate:
                 "cfg_coef": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1}),
                 "temperature": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.5, "step": 0.01}),
                 "steps": ("INT", {"default": 36, "min": 1, "max": 200, "step": 1}),
-                "dit_cfg_type": (["h", "m", "l"], {"default": "h"}),
                 "use_sampling": ("BOOLEAN", {"default": True}),
                 "top_k": ("INT", {"default": 100, "min": 1, "max": 1000, "step": 1}),
                 "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 300.0, "step": 1.0}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2**32-1}),
+                "unload": ("BOOLEAN", {"default": False, "tooltip": "Unload the model cache to free memory"}),
             }
         }
     
@@ -182,31 +192,64 @@ class SongBloomGenerate:
     OUTPUT_NODE = True    
 
     def _get_model(self, model_config, vae):
+        # Create a cache key based on model config and VAE
+        cache_key = f"{model_config['safetensor_path']}_{model_config['dtype']}_{id(vae)}"
+        
+        # Check if model is already cached
+        if cache_key in self._model_cache:
+            print(f"Using cached model for key: {cache_key}")
+            return self._model_cache[cache_key]
+        
         # Build the model
         if SongBloom_Sampler is None:
             raise RuntimeError("SongBloom package not found. Please ensure it's installed in the node directory.")
+        
+        print(f"Loading new model for key: {cache_key}")
         cfg = model_config['cfg']
         safetensor_path = model_config['safetensor_path']
         dtype = model_config['dtype']
         prompt_len = model_config.get('prompt_len', 10)
-        if dtype == 'float32':
-            torch_dtype = torch.float32
-        elif dtype == 'bfloat16':
+        
+        if dtype == 'bfloat16':
             torch_dtype = torch.bfloat16
         else:
             torch_dtype = torch.float32
+            
         model = SongBloom_Sampler.build_from_trainer(cfg, vae=vae, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path, external_vae=True)
         model.prompt_duration = cfg.sr * prompt_len
         if hasattr(cfg, 'inference') and cfg.inference:
             model.set_generation_params(**cfg.inference)
+        
+        # Cache the model
+        self._model_cache[cache_key] = model
+        print(f"Model cached. Total cached models: {len(self._model_cache)}")
+        
         return model
 
+    @classmethod
+    def clear_model_cache(cls):
+        """Clear the model cache to free memory"""
+        if cls._model_cache:
+            print(f"Clearing {len(cls._model_cache)} cached models")
+            for model in cls._model_cache.values():
+                if hasattr(model, 'to'):
+                    model.cpu()
+                del model
+            cls._model_cache.clear()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("Model cache cleared")
+
     def generate(self, model_config: dict, vae: object, lyrics: str, audio: dict, 
-                cfg_coef: float = 1.5, temperature: float = 0.9, steps: int = 50, dit_cfg_type: str = "h", 
+                cfg_coef: float = 1.5, temperature: float = 0.9, steps: int = 50, 
                 use_sampling: bool = True, top_k: int = 200, max_duration: float = 30.0, 
-                seed: int = -1):
+                seed: int = -1, unload: bool = False):
         """Generate music using SongBloom"""
         try:
+            # Clear cache if requested
+            if unload:
+                self.clear_model_cache()
+            
             model = self._get_model(model_config, vae)
             print("Model type:", type(model))
             model_sample_rate = model.sample_rate
@@ -259,7 +302,7 @@ class SongBloomGenerate:
                 "penalty_repeat": True,
                 "penalty_window": 50,
                 "steps": steps,
-                "dit_cfg_type": dit_cfg_type,
+                "dit_cfg_type": "h",
                 "use_sampling": use_sampling,
                 "max_frames": max_frames
             }
@@ -279,9 +322,18 @@ class SongBloomGenerate:
             }
             return (output_latent,)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"Failed to generate music: {e}")
+            # Check if this is an interruption-related exception
+            if isinstance(e, InterruptProcessingException):
+                # Re-raise interruption exceptions without wrapping them
+                raise
+            elif isinstance(e, KeyboardInterrupt):
+                # Re-raise keyboard interrupts without wrapping them
+                raise
+            else:
+                # For other exceptions, wrap them in RuntimeError with proper message
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError(f"Failed to generate music: {e}")
 
 
 class SongBloomDecoder:
