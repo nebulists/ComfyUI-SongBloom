@@ -1,5 +1,10 @@
 # ComfyUI Nodes for SongBloom
 
+Compatible tags:
+[verse] [chorus] [bridge] [intro] [outro] [inst] [silence]
+
+![Image](https://github.com/user-attachments/assets/5d91b6ec-a2df-42fc-bf54-45eb879cb55c)
+
 ## Installation
 1. Clone the repository to your custom_nodes folder:
   ```
