@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import torch
+import gc
 import torchaudio
 import json
 import tqdm
@@ -120,7 +121,7 @@ class SongBloomModelLoader:
         return {
             "required": {
                 "checkpoint": (safetensor_files, {"default": safetensor_files[0], "tooltip": "Pick a .safetensors checkpoint from models/checkpoints."}),
-                "vae_file": (vae_files, {"default": vae_files[0], "tooltip": "Pick a .safetensors VAE from models/vae."}),
+                "vae": (vae_files, {"default": vae_files[0], "tooltip": "Pick a .safetensors VAE from models/vae."}),
                 "dtype": (["float32", "bfloat16"], {"default": "bfloat16"}),
                 "prompt_len": ("INT", {"default": 10, "min": 1, "max": 60, "step": 1}),
             },
@@ -146,29 +147,32 @@ class SongBloomModelLoader:
         raw_cfg = OmegaConf.load(open(cfg_file, 'r'))
         return raw_cfg
     
-    def load_vae(self, vae_file: str):
+    def load_vae(self, vae: str):
         """Load VAE from safetensors file"""
         try:
             from .SongBloom.models.vae_frontend import StableVAE
         except ImportError as e:
             raise RuntimeError(f"Could not import SongBloom VAE code: {e}")
         vae_dir = os.path.join(folder_paths.models_dir, "vae")
-        vae_path = os.path.join(vae_dir, vae_file)
+        vae_path = os.path.join(vae_dir, vae)
         config_path = os.path.join(self.config_dir, "stable_audio_1920_vae.json")
         vae = StableVAE(vae_ckpt=None, vae_cfg=config_path, sr=48000, vae_safetensor_path=vae_path)
         return vae
     
-    def load_model(self, dtype: str, checkpoint: str, vae_file: str, lyric_processor: str = "phoneme", prompt_len: int = 10, **kwargs):
+    def load_model(self, dtype: str, checkpoint: str, vae: str, lyric_processor: str = "phoneme", prompt_len: int = 10, **kwargs):
         try:
             # Clear all cached models when loader is executed
             global _MODEL_CACHE
             _MODEL_CACHE.clear()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             print("Cleared all cached SongBloom models")
             
             print(f"Preparing to load SongBloom model: {model_name}")
             
             # Create a unique cache key for this model configuration
-            cache_key = f"{checkpoint}_{vae_file}_{dtype}_{lyric_processor}_{prompt_len}"
+            cache_key = f"{checkpoint}_{vae}_{dtype}_{lyric_processor}_{prompt_len}"
             
             # Check if model is already cached
             if cache_key in _MODEL_CACHE:
@@ -177,8 +181,8 @@ class SongBloomModelLoader:
                 return (cached_result["model_config"], cached_result["vae"])
             
             # Load VAE first
-            print(f"Loading VAE: {vae_file}")
-            vae = self.load_vae(vae_file)
+            print(f"Loading VAE: {vae}")
+            vae = self.load_vae(vae)
             
             # All files are local now
             # Use config_dir from instance variable
@@ -290,7 +294,12 @@ class SongBloomGenerate:
                 torch.manual_seed(seed)
                 np.random.seed(seed)
                 
-            lyrics = lyrics.replace('\r', ' ').replace('\n', ' , ').lower()
+            #lyrics = lyrics.replace('\r', ' ').replace('\n', ' , ').lower()
+            lyrics = '\n'.join(line.strip() for line in lyrics.split('\n'))
+            lyrics = re.sub(r'\n\s*\n', r' , ', lyrics)
+            lyrics = re.sub(r'(?<!\])\n', ', ', lyrics)
+            lyrics = lyrics.replace("[", " [").replace("]", "] ")
+            lyrics = re.sub(r' {2,}', ' ', lyrics)
             processed_lyrics = songbloom_model._process_lyric(lyrics)
             
             # Process input audio and prepare attributes
@@ -467,15 +476,80 @@ class SongBloomDecoder:
         return 0
 
 
+class SongBloomVAEEncoder:
+    """
+    Node to encode audio to SongBloom latents using the VAE (with optional chunked processing)
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("VAE",),
+                "audio": ("AUDIO",),
+            },
+            "optional": {
+                "chunked": ("BOOLEAN", {"default": False, "tooltip": "Enable chunked encoding for long audio."}),
+                "chunk_size": ("INT", {"default": 1000, "min": 10, "max": 5000, "step": 10, "tooltip": "Chunk size in latent frames (only used if chunked)."}),
+                "overlap": ("INT", {"default": 0, "min": 0, "max": 500, "step": 1, "tooltip": "Overlap in latent frames (only used if chunked)."}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+    FUNCTION = "encode"
+    CATEGORY = "audio/songbloom"
+
+    def encode(self, model: Any, audio: dict, chunked: bool = False, chunk_size: int = 1000, overlap: int = 0):
+        try:
+            vae_model = model
+            waveform = audio["waveform"]  # [batch, channels, samples]
+            sample_rate = audio["sample_rate"]
+            # Resample to 48000Hz if needed
+            target_sr = 48000
+            if sample_rate != target_sr:
+                import torchaudio
+                # waveform: [batch, channels, samples]
+                # Resample each batch separately
+                resampled = []
+                for w in waveform:
+                    resampled.append(torchaudio.functional.resample(w, sample_rate, target_sr))
+                # Pad/truncate to the same length
+                min_len = min(w.shape[-1] for w in resampled)
+                resampled = [w[..., :min_len] for w in resampled]
+                waveform = torch.stack(resampled, dim=0)
+                sample_rate = target_sr
+            # Move to model device and dtype
+            device = next(vae_model.parameters()).device
+            vae_dtype = next(vae_model.parameters()).dtype
+            waveform = waveform.to(device=device, dtype=vae_dtype)
+            # Use encode_audio for chunked, encode for non-chunked
+            if chunked:
+                latent = vae_model.vae.encode_audio(waveform, chunked=True, chunk_size=chunk_size, overlap=overlap)
+            else:
+                latent = vae_model.encode(waveform)
+            if isinstance(latent, tuple):
+                latent = latent[0]
+            if latent.dim() == 2:
+                latent = latent.unsqueeze(0)
+            output_latent = {"samples": latent.float().cpu()}
+            return (output_latent,)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(f"Failed to encode audio to latent: {e}")
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "SongBloomModelLoader": SongBloomModelLoader,
     "SongBloomGenerate": SongBloomGenerate,
     "SongBloomDecoder": SongBloomDecoder,
+    "SongBloomVAEEncoder": SongBloomVAEEncoder,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SongBloomModelLoader": "SongBloom Model Loader",
     "SongBloomGenerate": "SongBloom Generate",
     "SongBloomDecoder": "SongBloom Decoder",
+    "SongBloomVAEEncoder": "SongBloom VAE Encoder",
 }
