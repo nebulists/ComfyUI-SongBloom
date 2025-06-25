@@ -20,7 +20,6 @@ except ImportError:
 
 # Disable flash attention for compatibility
 os.environ['DISABLE_FLASH_ATTN'] = "1"
-repo_id = "CypressYang/SongBloom"
 model_name = "songbloom_full_150s"
 
 # Global flag to track if resolvers are registered
@@ -29,11 +28,15 @@ _RESOLVERS_REGISTERED = False
 def register_omegaconf_resolvers(cache_dir: str):
     """Register OmegaConf resolvers globally to avoid conflicts"""
     global _RESOLVERS_REGISTERED
-    if _RESOLVERS_REGISTERED:
-        print("Resolvers already registered, skipping...")
-        return
     
     print(f"Registering OmegaConf resolvers with cache_dir: {cache_dir}")
+    
+    # Clear existing resolvers if they exist
+    try:
+        OmegaConf.clear_resolver("dynamic_path")
+        print("Cleared existing dynamic_path resolver")
+    except:
+        pass
     
     resolvers = {
         "eval": lambda x: eval(x),
@@ -120,10 +123,12 @@ class SongBloomModelLoader:
     def __init__(self):
         self.cache_dir = os.path.join(folder_paths.models_dir , "songbloom")
         os.makedirs(self.cache_dir, exist_ok=True)
+        # Set config directory for resolvers
+        self.config_dir = os.path.join(os.path.dirname(__file__), "SongBloom", "config")
     
     def load_config(self, cfg_file: str) -> DictConfig:
         """Load configuration file with resolvers"""
-        register_omegaconf_resolvers(self.cache_dir)
+        register_omegaconf_resolvers(self.config_dir)
         raw_cfg = OmegaConf.load(open(cfg_file, 'r'))
         return raw_cfg
     
@@ -131,11 +136,10 @@ class SongBloomModelLoader:
         try:
             print(f"Preparing to load SongBloom model config: {model_name}")
             # All files are local now
-            # Assume config files are in SongBloom/config/
-            config_dir = os.path.join(os.path.dirname(__file__), "SongBloom", "config")
-            cfg_path = os.path.join(config_dir, f"{model_name}.yaml")
-            vae_cfg_path = os.path.join(config_dir, "stable_audio_1920_vae.json")
-            g2p_path = os.path.join(config_dir, "vocab_g2p.yaml")
+            # Use config_dir from instance variable
+            cfg_path = os.path.join(self.config_dir, f"{model_name}.yaml")
+            vae_cfg_path = os.path.join(self.config_dir, "stable_audio_1920_vae.json")
+            g2p_path = os.path.join(self.config_dir, "vocab_g2p.yaml")
             model_safetensor = os.path.join(folder_paths.models_dir, "checkpoints", checkpoint)
             safetensor_path = model_safetensor
             cfg = self.load_config(cfg_path)
@@ -160,10 +164,7 @@ class SongBloomGenerate:
     """
     Node to generate music using SongBloom model
     """
-    
-    # Class-level cache to store loaded models
-    _model_cache = {}
-    
+      
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -181,7 +182,6 @@ class SongBloomGenerate:
                 "top_k": ("INT", {"default": 100, "min": 1, "max": 1000, "step": 1}),
                 "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 300.0, "step": 1.0}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2**32-1}),
-                "unload": ("BOOLEAN", {"default": False, "tooltip": "Unload the model cache to free memory"}),
             }
         }
     
@@ -192,19 +192,15 @@ class SongBloomGenerate:
     OUTPUT_NODE = True    
 
     def _get_model(self, model_config, vae):
-        # Create a cache key based on model config and VAE
-        cache_key = f"{model_config['safetensor_path']}_{model_config['dtype']}_{id(vae)}"
-        
-        # Check if model is already cached
-        if cache_key in self._model_cache:
-            print(f"Using cached model for key: {cache_key}")
-            return self._model_cache[cache_key]
-        
         # Build the model
         if SongBloom_Sampler is None:
             raise RuntimeError("SongBloom package not found. Please ensure it's installed in the node directory.")
         
-        print(f"Loading new model for key: {cache_key}")
+        # Ensure resolvers are registered with correct config directory
+        config_dir = os.path.join(os.path.dirname(__file__), "SongBloom", "config")
+        register_omegaconf_resolvers(config_dir)
+        
+        print(f"Loading new model")
         cfg = model_config['cfg']
         safetensor_path = model_config['safetensor_path']
         dtype = model_config['dtype']
@@ -220,36 +216,14 @@ class SongBloomGenerate:
         if hasattr(cfg, 'inference') and cfg.inference:
             model.set_generation_params(**cfg.inference)
         
-        # Cache the model
-        self._model_cache[cache_key] = model
-        print(f"Model cached. Total cached models: {len(self._model_cache)}")
-        
         return model
-
-    @classmethod
-    def clear_model_cache(cls):
-        """Clear the model cache to free memory"""
-        if cls._model_cache:
-            print(f"Clearing {len(cls._model_cache)} cached models")
-            for model in cls._model_cache.values():
-                if hasattr(model, 'to'):
-                    model.cpu()
-                del model
-            cls._model_cache.clear()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            print("Model cache cleared")
 
     def generate(self, model_config: dict, vae: object, lyrics: str, audio: dict, 
                 cfg_coef: float = 1.5, temperature: float = 0.9, steps: int = 50, 
                 use_sampling: bool = True, top_k: int = 200, max_duration: float = 30.0, 
-                seed: int = -1, unload: bool = False):
+                seed: int = -1):
         """Generate music using SongBloom"""
         try:
-            # Clear cache if requested
-            if unload:
-                self.clear_model_cache()
-            
             model = self._get_model(model_config, vae)
             print("Model type:", type(model))
             model_sample_rate = model.sample_rate
@@ -408,12 +382,10 @@ class SongBloomDecoder:
                             chunk_audio = chunk_audio[:, :, audio_overlap_samples:]
                         decoded_chunks.append(chunk_audio)
                     del chunk_audio
-                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
                 print(f"Concatenating {len(decoded_chunks)} decoded chunks")
                 decoded_audio = torch.cat(decoded_chunks, dim=-1)
                 del decoded_chunks
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
             if decoded_audio.dim() == 2:
                 decoded_audio = decoded_audio.unsqueeze(0)  # Add batch dimension
