@@ -40,6 +40,7 @@ class SongBloom_PL(pl.LightningModule):
         for cond_name in model_cfg["condition_provider_cfg"]:
             if model_cfg["condition_provider_cfg"][cond_name]['type'] == 'audio_tokenizer_wrapper':
                 model_cfg["condition_provider_cfg"][cond_name]["audio_tokenizer"] = self.vae
+                model_cfg["condition_provider_cfg"][cond_name]["cache"] = False
         
         
         self.model = MVSA_DiTAR(**model_cfg)
