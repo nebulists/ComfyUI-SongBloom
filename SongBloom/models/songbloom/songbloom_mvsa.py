@@ -33,7 +33,7 @@ from ..musicgen.get_backend import get_backend
 
 from ..transformer import ContinuousTransformer as DiT_block
 from ..musicldm.musicldm_dit import FourierFeatures
-from ..musicldm.inference.sampling import get_alphas_sigmas, sample, sample_discrete_euler, sample_discrete_euler_with_temperature
+from ..musicldm.inference.sampling import get_alphas_sigmas, sample, sample_discrete_euler, sample_discrete_euler_with_temperature, sample_discrete_euler_spiral, sample_discrete_euler_with_temperature_pingpong
 
 ConditionTensors = tp.Dict[str, ConditionType]
 CFGConditions = tp.Union[ConditionTensors, tp.Tuple[ConditionTensors, ConditionTensors]]
@@ -365,7 +365,12 @@ class MVSA_DiTAR(StreamingModule):
                            diff_temp: float = 1.0, 
                            top_k: int = 0,
                            top_p: float = 0.0,
-                           penalty_token_pool: tp.Optional[list] = None) -> torch.Tensor:
+                           penalty_token_pool: tp.Optional[list] = None,
+                           sampling_method: str = "discrete_temperature",
+                           spiral_num_paths: int = 3,
+                           spiral_strength: float = 0.1,
+                           spiral_combination: str = "weighted_avg",
+                           pingpong_amplitude: float = 0.1) -> torch.Tensor:
         # infer: lm next_token -> (if % block_sz == 0) infer diff
         # 1. sample sketch (lm) -> 2. sample latent (lm+diff)
         sequence = sequence.clone()
@@ -473,10 +478,22 @@ class MVSA_DiTAR(StreamingModule):
             next_latent = sample(self.diffusion_forward, noise, steps=steps, eta=0, h=h, s=semantic_embs, history_x=prev_latents, 
                                  cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
         elif self.diffusion_objective == "rectified_flow":
-            # next_latent = sample_discrete_euler(self.diffusion_forward, noise, steps=steps, h=h, s=semantic_embs, history_x=prev_latents, 
-            #                                     cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
-            next_latent = sample_discrete_euler_with_temperature(self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
-                                                cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
+            if sampling_method == "discrete_temperature":
+                next_latent = sample_discrete_euler_with_temperature(self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
+                                                    cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
+            elif sampling_method == "spiral":
+                next_latent = sample_discrete_euler_spiral(self.diffusion_forward, noise, steps=steps, temperature=diff_temp, 
+                                             num_paths=spiral_num_paths, spiral_strength=spiral_strength, 
+                                             combination_method=spiral_combination, h=h, s=semantic_embs, history_x=prev_latents, 
+                                             cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
+            elif sampling_method == "pingpong":
+                next_latent = sample_discrete_euler_with_temperature_pingpong(self.diffusion_forward, noise, steps=steps, temperature=diff_temp, 
+                                                               ping_pong_amplitude=pingpong_amplitude, h=h, s=semantic_embs, history_x=prev_latents, 
+                                                               cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
+            else:
+                # Fallback to discrete temperature
+                next_latent = sample_discrete_euler_with_temperature(self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
+                                                    cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
         if condition_tensors and dit_cfg_type == 'global':
             cond_next_latent, uncond_next_latent = torch.chunk(next_latent, 2, dim=0)
             next_latent = uncond_next_latent + (cond_next_latent - uncond_next_latent) * cfg_coef_diff
@@ -503,7 +520,12 @@ class MVSA_DiTAR(StreamingModule):
                  top_k: int = 0,
                  top_p: float = 0.0,
                  penalty_repeat: bool = False,
-                 penalty_window: int = 50) -> torch.Tensor: 
+                 penalty_window: int = 50,
+                 sampling_method: str = "discrete_temperature",
+                 spiral_num_paths: int = 3,
+                 spiral_strength: float = 0.1,
+                 spiral_combination: str = "weighted_avg",
+                 pingpong_amplitude: float = 0.1) -> torch.Tensor: 
         assert not self.training, "generation shouldn't be used in training mode."
 
         B = len(conditions)
@@ -540,7 +562,12 @@ class MVSA_DiTAR(StreamingModule):
                                                                                    cfg_coef=cfg_coef, steps=steps, dit_cfg_type=dit_cfg_type,
                                                                                     use_sampling=use_sampling, temp=temp, diff_temp=diff_temp,
                                                                                     top_k=top_k, top_p=top_p,
-                                                                                    penalty_token_pool=penalty_token_pool)
+                                                                                    penalty_token_pool=penalty_token_pool,
+                                                                                    sampling_method=sampling_method,
+                                                                                    spiral_num_paths=spiral_num_paths,
+                                                                                    spiral_strength=spiral_strength,
+                                                                                    spiral_combination=spiral_combination,
+                                                                                    pingpong_amplitude=pingpong_amplitude)
                 
                 if (next_tokens == self.eos_token_id).any() or sequence.shape[1] > max_frames  / self.block_size * (self.block_size+1):
                     break

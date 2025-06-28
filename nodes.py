@@ -260,6 +260,11 @@ class SongBloomGenerate:
                 "top_k": ("INT", {"default": 100, "min": 1, "max": 1000, "step": 1}),
                 "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 300.0, "step": 1.0}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2**32-1}),
+                "sampling_method": (["discrete_temperature", "spiral", "pingpong"], {"default": "discrete_temperature"}),
+                "spiral_num_paths": ("INT", {"default": 3, "min": 1, "max": 10, "step": 1, "tooltip": "Number of spiral paths (only used with spiral sampling)"}),
+                "spiral_strength": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Spiral strength (only used with spiral sampling)"}),
+                "spiral_combination": (["weighted_avg", "best_path", "ensemble"], {"default": "weighted_avg", "tooltip": "How to combine spiral paths (only used with spiral sampling)"}),
+                "pingpong_amplitude": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Ping-pong oscillation amplitude (only used with pingpong sampling)"}),
             }
         }
     
@@ -272,7 +277,9 @@ class SongBloomGenerate:
     def generate(self, model: dict, lyrics: str, audio: dict, 
                 cfg_coef: float = 1.5, temperature: float = 0.9, diff_temp: float = 0.95, steps: int = 50, 
                 use_sampling: bool = True, dit_cfg_type: str = "h", top_k: int = 200,  max_duration: float = 30.0, 
-                seed: int = -1):
+                seed: int = -1, sampling_method: str = "discrete_temperature", 
+                spiral_num_paths: int = 3, spiral_strength: float = 0.1, spiral_combination: str = "weighted_avg",
+                pingpong_amplitude: float = 0.1):
         """Generate music using SongBloom"""
         try:
             # Use the cached model from the loader
@@ -339,7 +346,12 @@ class SongBloomGenerate:
                 "steps": steps,
                 "dit_cfg_type": dit_cfg_type,
                 "use_sampling": use_sampling,
-                "max_frames": max_frames
+                "max_frames": max_frames,
+                "sampling_method": sampling_method,
+                "spiral_num_paths": spiral_num_paths,
+                "spiral_strength": spiral_strength,
+                "spiral_combination": spiral_combination,
+                "pingpong_amplitude": pingpong_amplitude
             }
             songbloom_model.set_generation_params(**generation_params)
             print(f"Generating music with processed lyrics: {processed_lyrics[:50]}...")
