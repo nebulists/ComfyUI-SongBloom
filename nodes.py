@@ -505,7 +505,7 @@ class SongBloomDecoder:
     CATEGORY = "audio/songbloom"
     
     def decode(self, model: Any, latent: Dict[str, torch.Tensor], 
-               chunk_size: int = 100, overlap: int = 0, force_offload: bool = True):
+               chunk_size: int = 100, force_offload: bool = True):
         """Decode latent representation to audio using chunked processing with ComfyUI model management"""
         try:
             # Clean up memory before processing
@@ -516,8 +516,7 @@ class SongBloomDecoder:
             
             # model is a StableVAE instance
             vae_model = model.to(device)  # No wrapping needed
-            # Assume sample_rate is stored in the VAE or passed in
-            model_sample_rate = getattr(vae_model, "sr", 48000)
+            model_sample_rate = 48000
 
             # Get latent samples
             latent_samples = latent["samples"]  # Shape: [batch, channels, time]
@@ -529,11 +528,7 @@ class SongBloomDecoder:
 
             batch_size, channels, time_frames = latent_samples.shape
 
-            print(f"Decoding latent shape: {latent_samples.shape} using chunks of size {chunk_size} with overlap {overlap}")
-
-            if overlap >= chunk_size:
-                overlap = chunk_size // 2
-                print(f"Warning: overlap too large, reduced to {overlap}")
+            print(f"Decoding latent shape: {latent_samples.shape} using chunks of size {chunk_size}")
 
             if time_frames <= chunk_size:
                 print("Sequence short enough, decoding without chunking")
@@ -541,23 +536,14 @@ class SongBloomDecoder:
                     decoded_audio = vae_model.decode(latent_samples)
             else:
                 decoded_chunks = []
-                step_size = chunk_size - overlap
 
-                for start_idx in range(0, time_frames, step_size):
+                for start_idx in range(0, time_frames, chunk_size):
                     end_idx = min(start_idx + chunk_size, time_frames)
                     print(f"Decoding chunk {start_idx}:{end_idx} ({end_idx - start_idx} frames)")
                     chunk_latent = latent_samples[:, :, start_idx:end_idx]
                     with torch.no_grad():
                         chunk_audio = vae_model.decode(chunk_latent)
-                    if start_idx == 0:
-                        decoded_chunks.append(chunk_audio)
-                    else:
-                        audio_overlap_samples = self._calculate_audio_overlap(
-                            overlap, chunk_audio.shape[-1], chunk_size
-                        )
-                        if audio_overlap_samples > 0 and chunk_audio.shape[-1] > audio_overlap_samples:
-                            chunk_audio = chunk_audio[:, :, audio_overlap_samples:]
-                        decoded_chunks.append(chunk_audio)
+                    decoded_chunks.append(chunk_audio)
                     del chunk_audio
 
                 print(f"Concatenating {len(decoded_chunks)} decoded chunks")
@@ -586,15 +572,6 @@ class SongBloomDecoder:
             import traceback
             traceback.print_exc()
             raise RuntimeError(f"Failed to decode latent: {e}")
-    
-    def _calculate_audio_overlap(self, latent_overlap: int, audio_samples: int, latent_chunk_size: int) -> int:
-        """Calculate the number of audio samples corresponding to latent overlap"""
-        # This assumes a linear relationship between latent frames and audio samples
-        # You may need to adjust this based on the specific VAE architecture
-        if latent_chunk_size > 0:
-            samples_per_latent_frame = audio_samples / latent_chunk_size
-            return int(latent_overlap * samples_per_latent_frame)
-        return 0
 
 
 class SongBloomVAEEncoder:
