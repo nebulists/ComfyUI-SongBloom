@@ -515,7 +515,7 @@ class SongBloomDecoder:
             device, offload_device = get_devices()
             
             # model is a StableVAE instance
-            vae_model = model  # No wrapping needed
+            vae_model = model.to(device)  # No wrapping needed
             # Assume sample_rate is stored in the VAE or passed in
             model_sample_rate = getattr(vae_model, "sr", 48000)
 
@@ -629,7 +629,7 @@ class SongBloomVAEEncoder:
             # Get devices
             device, offload_device = get_devices()
             
-            vae_model = model
+            vae_model = model.to(device)
             waveform = audio["waveform"]  # [batch, channels, samples]
             sample_rate = audio["sample_rate"]
             # Resample to 48000Hz if needed
