@@ -244,10 +244,10 @@ class SongBloomModelLoader:
                 cfg.train_dataset.lyric_processor = lyric_processor
             
             # Convert dtype string to torch dtype
-            if dtype == 'bfloat16':
-                torch_dtype = torch.bfloat16
-            else:
+            if dtype == 'float32':
                 torch_dtype = torch.float32
+            elif dtype == 'bfloat16':
+                torch_dtype = torch.bfloat16
             
             # Build the model
             if SongBloom_Sampler is None:
@@ -331,8 +331,8 @@ class SongBloomGenerate:
     OUTPUT_NODE = True    
 
     def generate(self, model: dict, lyrics: str, audio: dict, 
-                cfg_coef: float = 1.5, temperature: float = 0.9, diff_temp: float = 0.95, steps: int = 50, 
-                use_sampling: bool = True, dit_cfg_type: str = "h", top_k: int = 200,  max_duration: float = 30.0, 
+                cfg_coef: float = 1.5, temperature: float = 0.9, diff_temp: float = 0.95, steps: int = 36, 
+                use_sampling: bool = True, dit_cfg_type: str = "h", top_k: int = 100,  max_duration: float = 30.0, 
                 seed: int = -1, force_offload: bool = True):
         """Generate music using SongBloom with ComfyUI model management"""
         try:
@@ -353,8 +353,6 @@ class SongBloomGenerate:
                 model_dtype = torch.float32
             elif dtype == 'bfloat16':
                 model_dtype = torch.bfloat16
-            else:
-                model_dtype = torch.float32
                 
             # Set random seed if specified
             if seed != -1:

@@ -77,7 +77,7 @@ class MVSA_DiTAR(StreamingModule):
                  ):
         super().__init__()
 
-        self.condition_provider = get_conditioner_provider(condition_provider_cfg)
+        self.condition_provider = get_conditioner_provider(condition_provider_cfg).cpu()
         self.fuser = get_condition_fuser(fuser_cfg)
         
         self.dim = dim  
@@ -102,7 +102,6 @@ class MVSA_DiTAR(StreamingModule):
         if self.backend == 'llama':
             self.ar_transformer = get_backend('llama', 
                                         dim, num_heads, lm_layers, hidden_scale,init_std=init_std, rope_theta=rotary_base_val)
-            self.ar_transformer.gradient_checkpointing_enable()
         elif self.backend == 'bart':
             self.cross_encoder = get_backend('bart_enc',
                                         dim, num_heads, lm_layers // 4, hidden_scale,init_std=init_std)
@@ -154,7 +153,6 @@ class MVSA_DiTAR(StreamingModule):
             rotary_base_val = rotary_base_val,
             # init_std=init_std
         )
-        self.nar_dit.gradient_checkpointing_enable()
         
         self.diffusion_objective = diffusion_objective
         self.timestep_sampler = timestep_sampler
@@ -483,13 +481,13 @@ class MVSA_DiTAR(StreamingModule):
                  prompt: tp.Optional[torch.Tensor] = None,
                  conditions: tp.List[ConditioningAttributes] = [],
                  cfg_coef: tp.Optional[tp.Union[float, tp.List[float]]] = None,
-                 steps=50,
+                 steps=36,
                  dit_cfg_type: str = 'h',
                  max_frames: int = 1500, # 60 * 25
                  use_sampling: bool = True,
-                 temp: float = 1.0,
-                 diff_temp: float = 1.0,
-                 top_k: int = 0,
+                 temp: float = 0.9,
+                 diff_temp: float = 0.95,
+                 top_k: int = 100,
                  top_p: float = 0.0,
                  penalty_repeat: bool = False,
                  penalty_window: int = 50) -> torch.Tensor: 
@@ -502,18 +500,19 @@ class MVSA_DiTAR(StreamingModule):
         tokenized = self.condition_provider.tokenize(conditions)
         condition_tensors = self.condition_provider(tokenized)          
         
-        
         sequence = self.bos_token.reshape(1,1,-1).expand(B, 1, -1)
         if prompt is not None:
             # TODO 
             raise NotImplementedError
             # sequence = torch.cat([sequence, prompt])
 
-            
+                    
         prev_blocks = torch.zeros((B, self.block_size, self.latent_dim), device=sequence.device, dtype=sequence.dtype)
         latent_seq, token_seq = None, None
             
         max_tokens = max_frames
+
+        torch.cuda.empty_cache()
 
         with self.streaming():
             prog_bar = tqdm.tqdm()
@@ -526,7 +525,7 @@ class MVSA_DiTAR(StreamingModule):
                     if penalty_token_pool.shape[-1] < penalty_window:
                         penalty_token_pool = F.pad(penalty_token_pool, (penalty_window - penalty_token_pool.shape[-1], 0), value=self.eos_token_id)
                 next_tokens, next_latent, next_block_seq = self._sample_next_block(sequence[:, -1: ], prev_blocks, condition_tensors, 
-                                                                                   cfg_coef=cfg_coef, steps=steps, dit_cfg_type=dit_cfg_type,
+                                                                                cfg_coef=cfg_coef, steps=steps, dit_cfg_type=dit_cfg_type,
                                                                                     use_sampling=use_sampling, temp=temp, diff_temp=diff_temp,
                                                                                     top_k=top_k, top_p=top_p,
                                                                                     penalty_token_pool=penalty_token_pool)

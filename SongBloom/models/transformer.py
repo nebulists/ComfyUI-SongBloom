@@ -851,7 +851,6 @@ class ContinuousTransformer(nn.Module):
                     **kwargs
                 )
             )
-        self.gradient_checkpointing = False
         
         self.apply(partial(self._init_weights,init_std=init_std))
         
@@ -901,17 +900,9 @@ class ContinuousTransformer(nn.Module):
 
         for layer_idx, layer in enumerate(self.layers):
             if layer.cross_attend:  
-                # x = layer(x, mask, global_cond=global_cond, rotary_pos_emb=rotary_pos_emb, context=context, context_mask=context_mask,**kwargs)
-                if self.gradient_checkpointing:
-                    x = checkpoint(layer, x, mask, global_cond, context, context_mask, rotary_pos_emb=rotary_pos_emb, **kwargs)
-                else:
-                    x = layer(x, mask, global_cond, context, context_mask, rotary_pos_emb=rotary_pos_emb, **kwargs)
+                x = layer(x, mask, global_cond, context, context_mask, rotary_pos_emb=rotary_pos_emb, **kwargs)
             else:
-                # x = layer(x, mask, global_cond=global_cond, rotary_pos_emb=rotary_pos_emb, **kwargs)
-                if self.gradient_checkpointing:
-                    x = checkpoint(layer, x, mask, global_cond, rotary_pos_emb=rotary_pos_emb, **kwargs)
-                else:
-                    x = layer(x, mask, global_cond, rotary_pos_emb=rotary_pos_emb, **kwargs)
+                x = layer(x, mask, global_cond, rotary_pos_emb=rotary_pos_emb, **kwargs)
             if return_info:
                 info["hidden_states"].append(x)
 
@@ -920,11 +911,7 @@ class ContinuousTransformer(nn.Module):
         if return_info:
             return x, info
         
-        return x
-
-    def gradient_checkpointing_enable(self):
-        self.gradient_checkpointing = True
-        
+        return x      
         
     def _init_weights(self, module, init_std=0.02):
         if isinstance(module, nn.Linear):
