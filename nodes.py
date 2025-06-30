@@ -143,7 +143,6 @@ class SongBloomModelLoader:
                 "checkpoint": (safetensor_files, {"default": safetensor_files[0], "tooltip": "Pick a .safetensors checkpoint from models/checkpoints."}),
                 "vae": (vae_files, {"default": vae_files[0], "tooltip": "Pick a .safetensors VAE from models/vae."}),
                 "dtype": (["float32", "bfloat16"], {"default": "bfloat16"}),
-                "prompt_len": ("INT", {"default": 10, "min": 1, "max": 60, "step": 1}),
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after loading"}),
@@ -189,7 +188,7 @@ class SongBloomModelLoader:
         
         return vae
     
-    def load_model(self, dtype: str, checkpoint: str, vae: str, prompt_len: int = 10, force_offload: bool = True, **kwargs):
+    def load_model(self, dtype: str, checkpoint: str, vae: str, force_offload: bool = True, **kwargs):
         try:
             # Clean up memory before loading
             cleanup_memory()
@@ -233,13 +232,7 @@ class SongBloomModelLoader:
             if SongBloom_Sampler is None:
                 raise RuntimeError(
                     "Failed to load SongBloom model: SongBloom package not found. "
-                    "This usually means the SongBloom submodule or its dependencies are missing or not installed correctly. "
-                    "Please ensure the following:\n"
-                    "1. The 'SongBloom' directory exists in your custom node folder (expected at: {}), and contains the models and code.\n"
-                    "2. All SongBloom Python dependencies are installed (see requirements.txt).\n"
-                    "3. If you recently cloned or updated, run 'git submodule update --init --recursive' in your custom node directory.\n"
-                    "4. Restart ComfyUI after making changes.\n"
-                    "Original import error: {}".format(
+                    "import error: {}".format(
                         os.path.join(os.path.dirname(__file__), "SongBloom"),
                         _SONGBLOOM_IMPORT_ERROR or "SongBloom_Sampler is None."
                     )
@@ -247,12 +240,10 @@ class SongBloomModelLoader:
             
             print(f"Loading new model with dtype: {dtype}")
             model = SongBloom_Sampler.build_from_trainer(cfg, vae=vae, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path, external_vae=True)
-            model.prompt_duration = cfg.sr * prompt_len
+            model.prompt_duration = cfg.sr * 10
             if hasattr(cfg, 'inference') and cfg.inference:
                 model.set_generation_params(**cfg.inference)
             
-            # Note: SongBloom_Sampler doesn't have .to() method, device is managed internally
-            # The model is already on the correct device from build_from_trainer
             print(f"Model loaded on device: {model.device}")
             
             # Create model config with loaded model
@@ -263,7 +254,7 @@ class SongBloomModelLoader:
                 "g2p_path": g2p_path,
                 "safetensor_path": safetensor_path,
                 "dtype": dtype,
-                "prompt_len": prompt_len,
+                "prompt_len": 10,
                 "device": device,
                 "offload_device": offload_device
             }
@@ -310,7 +301,7 @@ class SongBloomGenerate:
                 "use_sampling": ("BOOLEAN", {"default": True}),
                 "dit_cfg_type": (["h", "global"], {"default": "h"}),
                 "top_k": ("INT", {"default": 100, "min": 1, "max": 1000, "step": 1}),
-                "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 300.0, "step": 1.0}),
+                "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 250.0, "step": 1.0}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2**32-1}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after generation"}),
             }
