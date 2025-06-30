@@ -63,32 +63,13 @@ def register_omegaconf_resolvers(cache_dir: str):
 
 try:
     from .SongBloom.models.songbloom.songbloom_pl import SongBloom_Sampler
+    _SONGBLOOM_IMPORT_ERROR = None
 except ImportError as e:
     print(f"Warning: Could not import SongBloom: {e}")
     SongBloom_Sampler = None
     symbols = []
     LABELS = {}
-
-# Helper to wrap a raw SongBloom model into the expected dict format
-def wrap_songbloom_model(model):
-    # If already a dict, return as is
-    if isinstance(model, dict) and "model" in model:
-        return model
-    # If it's a SongBloom_Sampler or SongBloom_PL, wrap it
-    # Try to extract metadata, fallback to defaults if missing
-    sample_rate = getattr(model, "sample_rate", 48000)
-    frame_rate = getattr(model, "frame_rate", 25)
-    max_duration = getattr(model, "max_duration", 30.0)
-    dtype = getattr(model, "dtype", torch.float32)
-    lyric_processor_key = getattr(model, "lyric_processor_key", "phoneme")
-    return {
-        "model": model,
-        "sample_rate": sample_rate,
-        "frame_rate": frame_rate,
-        "max_duration": max_duration,
-        "dtype": dtype,
-        "lyric_processor_key": lyric_processor_key,
-    }
+    _SONGBLOOM_IMPORT_ERROR = e
 
 def get_devices():
     """Get current devices using ComfyUI model management"""
@@ -165,7 +146,6 @@ class SongBloomModelLoader:
                 "prompt_len": ("INT", {"default": 10, "min": 1, "max": 60, "step": 1}),
             },
             "optional": {
-                "lyric_processor": (["pinyin", "phoneme", "none"], {"default": "phoneme"}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after loading"}),
             }
         }
@@ -209,7 +189,7 @@ class SongBloomModelLoader:
         
         return vae
     
-    def load_model(self, dtype: str, checkpoint: str, vae: str, lyric_processor: str = "phoneme", prompt_len: int = 10, force_offload: bool = True, **kwargs):
+    def load_model(self, dtype: str, checkpoint: str, vae: str, prompt_len: int = 10, force_offload: bool = True, **kwargs):
         try:
             # Clean up memory before loading
             cleanup_memory()
@@ -241,7 +221,7 @@ class SongBloomModelLoader:
             
             cfg = self.load_config(cfg_path)
             if hasattr(cfg, 'train_dataset'):
-                cfg.train_dataset.lyric_processor = lyric_processor
+                cfg.train_dataset.lyric_processor = "phoneme"
             
             # Convert dtype string to torch dtype
             if dtype == 'float32':
@@ -251,7 +231,19 @@ class SongBloomModelLoader:
             
             # Build the model
             if SongBloom_Sampler is None:
-                raise RuntimeError("SongBloom package not found. Please ensure it's installed in the node directory.")
+                raise RuntimeError(
+                    "Failed to load SongBloom model: SongBloom package not found. "
+                    "This usually means the SongBloom submodule or its dependencies are missing or not installed correctly. "
+                    "Please ensure the following:\n"
+                    "1. The 'SongBloom' directory exists in your custom node folder (expected at: {}), and contains the models and code.\n"
+                    "2. All SongBloom Python dependencies are installed (see requirements.txt).\n"
+                    "3. If you recently cloned or updated, run 'git submodule update --init --recursive' in your custom node directory.\n"
+                    "4. Restart ComfyUI after making changes.\n"
+                    "Original import error: {}".format(
+                        os.path.join(os.path.dirname(__file__), "SongBloom"),
+                        _SONGBLOOM_IMPORT_ERROR or "SongBloom_Sampler is None."
+                    )
+                )
             
             print(f"Loading new model with dtype: {dtype}")
             model = SongBloom_Sampler.build_from_trainer(cfg, vae=vae, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path, external_vae=True)

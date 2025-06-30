@@ -45,11 +45,6 @@ class SongBloom_PL(pl.LightningModule):
         
         self.model = MVSA_DiTAR(**model_cfg)
         # print(self.model)
-        
-
-
-
-
 
 ####################################
 
@@ -60,7 +55,10 @@ class SongBloom_Sampler:
         self.compression_model = compression_model
         self.diffusion = diffusion
         self.lyric_processor_key = lyric_processor_key
-        self.lyric_processor = key2processor.get(lyric_processor_key) if lyric_processor_key is not None else lambda x: x
+        if lyric_processor_key == 'pinyin':
+            self.lyric_processor = key2processor.get(lyric_processor_key)() if lyric_processor_key is not None else lambda x: x
+        else:
+            self.lyric_processor = key2processor.get(lyric_processor_key) if lyric_processor_key is not None else lambda x: x
         # import pdb; pdb.set_trace()
 
         assert max_duration is not None

@@ -1,11 +1,11 @@
 import os, sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from pinyin.pinyin import G2P_PinYin
+#from pinyin.pinyin import G2P_PinYin
 from cn_zh_g2p import G2P_Mix, symbols
 
 key2processor = {
-    'pinyin': G2P_PinYin(), 
+    'pinyin': lambda: __import__('pinyin.pinyin', fromlist=['G2P_PinYin']).G2P_PinYin(), 
     'phoneme': G2P_Mix(),
 }
 
