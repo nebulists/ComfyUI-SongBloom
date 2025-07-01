@@ -57,7 +57,7 @@ import numpy as np
 
 @torch.no_grad()
 def sample_discrete_euler_spiral(model, x, steps, temperature=1.0, sigma_max=1.0, 
-                                 num_paths=3, spiral_strength=0.1, prog_bar=False, 
+                                 num_paths=2, spiral_strength=0.1, prog_bar=False, 
                                  combination_method='weighted_avg', **extra_args):
     """
     Multi-path spiral sampling using Euler method.

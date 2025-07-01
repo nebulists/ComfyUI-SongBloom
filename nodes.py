@@ -304,6 +304,7 @@ class SongBloomGenerate:
                 "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 250.0, "step": 1.0}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2**32-1}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after generation"}),
+                "sampler": (["discrete_euler", "spiral", "pingpong"], {"default": "discrete_euler", "tooltip": "Choose the sampler: discrete_euler (default), spiral, or pingpong."}),
             }
         }
     
@@ -316,7 +317,7 @@ class SongBloomGenerate:
     def generate(self, model: dict, lyrics: str, audio: dict, 
                 cfg_coef: float = 1.5, temperature: float = 0.9, diff_temp: float = 0.95, steps: int = 36, 
                 use_sampling: bool = True, dit_cfg_type: str = "h", top_k: int = 100,  max_duration: float = 30.0, 
-                seed: int = -1, force_offload: bool = True):
+                seed: int = -1, force_offload: bool = True, sampler: str = "discrete_euler", **kwargs):
         """Generate music using SongBloom with ComfyUI model management"""
         try:
             # Clean up memory before processing
@@ -402,7 +403,13 @@ class SongBloomGenerate:
                 "dit_cfg_type": dit_cfg_type,
                 "use_sampling": use_sampling,
                 "max_frames": max_frames,
+                "sampler": sampler,
             }
+            # Optionally, pass spiral/pingpong kwargs if present in kwargs
+            if sampler == "spiral" and "spiral_kwargs" in kwargs:
+                generation_params["spiral_kwargs"] = kwargs["spiral_kwargs"]
+            if sampler == "pingpong" and "pingpong_kwargs" in kwargs:
+                generation_params["pingpong_kwargs"] = kwargs["pingpong_kwargs"]
             songbloom_model.set_generation_params(**generation_params)
             print(f"Generating music with processed lyrics: {processed_lyrics[:50]}...")
             print(f"Prompt audio shape: {prompt_wav.shape}, Sample rate: {model_sample_rate}")
