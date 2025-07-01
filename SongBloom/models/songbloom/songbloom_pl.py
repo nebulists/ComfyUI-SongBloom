@@ -74,36 +74,34 @@ class SongBloom_Sampler:
         self._progress_callback: tp.Optional[tp.Callable[[int, int], None]] = None
 
     @classmethod
-    def build_from_trainer(cls, cfg, vae, strict=True, dtype=torch.float32, safetensor_path=None, external_vae=False):
+    def build_from_trainer(cls, cfg, strict=True, dtype=torch.float32, safetensor_path=None):
+        from ..vae_frontend import StableVAE
+        import json
+        import os
+        
+        # Load VAE config
+        config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "config")
+        vae_cfg_path = os.path.join(config_dir, "stable_audio_1920_vae.json")
+        
+        # Create VAE using StableVAE (without loading weights initially)
+        vae = StableVAE(vae_ckpt=None, vae_cfg=vae_cfg_path, sr=48000)
+        
+        # Create the model with the VAE
         model_light = SongBloom_PL(cfg, vae)
+        
+        # Load the checkpoint - this will load both VAE and diffusion model weights
         if safetensor_path is not None:
             print(f"Loading weights from safetensor: {safetensor_path}")
             state_dict = safetensors_load_file(safetensor_path, device='cpu')
-            
-            # If using external VAE, filter out VAE weights from the state dict
-            if external_vae:
-                print("Using external VAE, filtering out VAE weights from checkpoint")
-                filtered_state_dict = {}
-                for key, value in state_dict.items():
-                    # Skip keys that start with 'vae.' as these are VAE weights
-                    if not key.startswith('vae.'):
-                        filtered_state_dict[key] = value
-                    else:
-                        print(f"Skipping VAE weight: {key}")
-                state_dict = filtered_state_dict
-                # Set strict=False since we're intentionally missing VAE weights
-                strict = False
-            
-            incompatible = model_light.load_state_dict(state_dict, strict=strict)
         else:
-            incompatible = model_light.load_state_dict(torch.load(cfg.pretrained_path, map_location='cpu'), strict=strict)
+            state_dict = torch.load(cfg.pretrained_path, map_location='cpu')
+        
+        # Load the state dict - this will include the VAE weights
+        incompatible = model_light.load_state_dict(state_dict, strict=strict)
+        print(f"Incompatible keys: {incompatible}")
+        
         lyric_processor_key = cfg.train_dataset.lyric_processor
         
-        # Only print incompatible keys if not using external VAE
-        if not external_vae:
-            print(incompatible)
-        else:
-            print("External VAE mode: VAE weights loaded separately, skipping incompatible keys report")
         model_light = model_light.eval().cuda().to(dtype=dtype)
         model = cls(
             compression_model = model_light.vae,

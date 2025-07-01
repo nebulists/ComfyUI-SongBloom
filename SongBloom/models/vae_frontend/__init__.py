@@ -45,18 +45,17 @@ class AbstractVAE(ABC, nn.Module):
 
 
 class StableVAE(AbstractVAE):
-    def __init__(self, vae_ckpt, vae_cfg, sr=48000, vae_safetensor_path=None) -> None:
+    def __init__(self, vae_ckpt, vae_cfg, sr=48000, vae_state_dict=None) -> None:
         super().__init__()
         import json
         with open(vae_cfg) as f:
             config = json.load(f)
         self.vae: AudioAutoencoder = create_autoencoder_from_config(config)
-        if vae_safetensor_path is not None:
-            print(f"Loading VAE weights from safetensor: {vae_safetensor_path}")
-            state_dict = safetensors_load_file(vae_safetensor_path, device='cpu')
-            self.vae.load_state_dict(state_dict)
+        if vae_state_dict is not None:
+            print(f"Loading VAE weights from provided state dict")
+            self.vae.load_state_dict(vae_state_dict)
         else:
-            self.vae.load_state_dict(torch.load(vae_ckpt)['state_dict'])
+            print("Warning: No VAE weights provided, using uninitialized VAE")
         self.sample_rate = sr
         self.rsp48k = torchaudio.transforms.Resample(sr, self.orig_sample_rate) if sr != self.orig_sample_rate else nn.Identity()
        

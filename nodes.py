@@ -124,24 +124,13 @@ class SongBloomModelLoader:
             return []
         return [f for f in os.listdir(checkpoints_dir) if f.endswith('.safetensors')]
 
-    @staticmethod
-    def _list_vae_safetensors():
-        """List available .safetensors files in the VAE directory."""
-        vae_dir = os.path.join(folder_paths.models_dir, "vae")
-        if not os.path.exists(vae_dir):
-            return []
-        return [f for f in os.listdir(vae_dir) if f.endswith('.safetensors')]
-
     @classmethod
     def INPUT_TYPES(cls):
         safetensor_files = cls._list_safetensors()
         safetensor_files = safetensor_files if safetensor_files else ["None found"]
-        vae_files = cls._list_vae_safetensors()
-        vae_files = vae_files if vae_files else ["None found"]
         return {
             "required": {
                 "checkpoint": (safetensor_files, {"default": safetensor_files[0], "tooltip": "Pick a .safetensors checkpoint from models/checkpoints."}),
-                "vae": (vae_files, {"default": vae_files[0], "tooltip": "Pick a .safetensors VAE from models/vae."}),
                 "dtype": (["float32", "bfloat16"], {"default": "bfloat16"}),
             },
             "optional": {
@@ -149,8 +138,8 @@ class SongBloomModelLoader:
             }
         }
     
-    RETURN_TYPES = ("SONGBLOOM_MODEL", "VAE",)
-    RETURN_NAMES = ("model", "vae",)
+    RETURN_TYPES = ("SONGBLOOM_MODEL",)
+    RETURN_NAMES = ("model",)
     FUNCTION = "load_model"
     CATEGORY = "audio/songbloom"
     
@@ -166,29 +155,7 @@ class SongBloomModelLoader:
         raw_cfg = OmegaConf.load(open(cfg_file, 'r'))
         return raw_cfg
     
-    def load_vae(self, vae: str):
-        """Load VAE from safetensors file"""
-        try:
-            from .SongBloom.models.vae_frontend import StableVAE
-        except ImportError as e:
-            raise RuntimeError(f"Could not import SongBloom VAE code: {e}")
-        
-        # Get devices
-        device, offload_device = get_devices()
-        
-        vae_dir = os.path.join(folder_paths.models_dir, "vae")
-        vae_path = os.path.join(vae_dir, vae)
-        config_path = os.path.join(self.config_dir, "stable_audio_1920_vae.json")
-        
-        print(f"Loading VAE from: {vae_path}")
-        vae = StableVAE(vae_ckpt=None, vae_cfg=config_path, sr=48000, vae_safetensor_path=vae_path)
-        
-        # Move VAE to appropriate device
-        vae.to(device)
-        
-        return vae
-    
-    def load_model(self, dtype: str, checkpoint: str, vae: str, force_offload: bool = True, **kwargs):
+    def load_model(self, dtype: str, checkpoint: str, force_offload: bool = True, **kwargs):
         try:
             # Clean up memory before loading
             cleanup_memory()
@@ -201,10 +168,6 @@ class SongBloomModelLoader:
                 debug_memory_usage(device)
             
             print(f"Preparing to load SongBloom model: {model_name}")
-            
-            # Load VAE first
-            print(f"Loading VAE: {vae}")
-            vae = self.load_vae(vae)
             
             # All files are local now
             # Use config_dir from instance variable
@@ -228,7 +191,7 @@ class SongBloomModelLoader:
             elif dtype == 'bfloat16':
                 torch_dtype = torch.bfloat16
             
-            # Build the model
+            # Build the model - no external VAE needed
             if SongBloom_Sampler is None:
                 raise RuntimeError(
                     "Failed to load SongBloom model: SongBloom package not found. "
@@ -239,7 +202,7 @@ class SongBloomModelLoader:
                 )
             
             print(f"Loading new model with dtype: {dtype}")
-            model = SongBloom_Sampler.build_from_trainer(cfg, vae=vae, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path, external_vae=True)
+            model = SongBloom_Sampler.build_from_trainer(cfg, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path)
             model.prompt_duration = cfg.sr * 10
             if hasattr(cfg, 'inference') and cfg.inference:
                 model.set_generation_params(**cfg.inference)
@@ -273,7 +236,7 @@ class SongBloomModelLoader:
             if mm is not None:
                 debug_memory_usage(device)
             
-            return (model_config, vae)
+            return (model_config,)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -308,8 +271,8 @@ class SongBloomGenerate:
             }
         }
     
-    RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("latent",)
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
     FUNCTION = "generate"
     CATEGORY = "audio/songbloom"
     OUTPUT_NODE = True    
@@ -415,16 +378,52 @@ class SongBloomGenerate:
             print(f"Prompt audio shape: {prompt_wav.shape}, Sample rate: {model_sample_rate}")
             print(f"Generation params: {generation_params}")
             
-            # Generate music - get latent representation only
+            # Generate music - get latent representation and decode to audio with chunking
             with torch.no_grad():
                 latent_seq, token_seq = songbloom_model.diffusion.generate(None, attributes, **generation_params)
+                
+                # Get the compression model for decoding
+                vae_model = songbloom_model.compression_model
+                
+                # Get latent samples and move to model device and dtype
+                if latent_seq.dim() == 2:
+                    latent_seq = latent_seq.unsqueeze(0)  # Add batch dimension
+                
+                vae_device = next(vae_model.parameters()).device
+                vae_dtype = next(vae_model.parameters()).dtype
+                latent_samples = latent_seq.to(device=vae_device, dtype=vae_dtype)
+                
+                batch_size, channels, time_frames = latent_samples.shape
+                
+                chunk_size = 1000
+                print(f"Decoding latent shape: {latent_samples.shape} using chunks of size {chunk_size}")
+                
+                # Decode with chunking for memory efficiency
+                if time_frames <= chunk_size:
+                    print("Sequence short enough, decoding without chunking")
+                    decoded_audio = vae_model.decode(latent_samples)
+                else:
+                    decoded_chunks = []
+                    
+                    for start_idx in range(0, time_frames, chunk_size):
+                        end_idx = min(start_idx + chunk_size, time_frames)
+                        print(f"Decoding chunk {start_idx}:{end_idx} ({end_idx - start_idx} frames)")
+                        chunk_latent = latent_samples[:, :, start_idx:end_idx]
+                        chunk_audio = vae_model.decode(chunk_latent)
+                        decoded_chunks.append(chunk_audio)
+                        del chunk_audio
+                    
+                    print(f"Concatenating {len(decoded_chunks)} decoded chunks")
+                    decoded_audio = torch.cat(decoded_chunks, dim=-1)
+                    del decoded_chunks
             
-            # Convert latent to ComfyUI LATENT format
-            if latent_seq.dim() == 2:
-                latent_seq = latent_seq.unsqueeze(0)  # Add batch dimension
-            print(f"Generated latent shape: {latent_seq.shape}")
-            output_latent = {
-                "samples": latent_seq.float().cpu()
+            # Convert to ComfyUI AUDIO format
+            if decoded_audio.dim() == 2:
+                decoded_audio = decoded_audio.unsqueeze(0)  # Add batch dimension
+            print(f"Generated audio shape: {decoded_audio.shape}")
+            output_audio = {
+                "waveform": decoded_audio.float().cpu(),
+                "sample_rate": model_sample_rate
             }
             
             # Offload model if requested - move internal components to CPU
@@ -440,7 +439,7 @@ class SongBloomGenerate:
             if mm is not None:
                 debug_memory_usage(device)
             
-            return (output_latent,)
+            return (output_audio,)
         except Exception as e:
             # Check if this is an interruption-related exception
             if isinstance(e, InterruptProcessingException):
@@ -455,187 +454,13 @@ class SongBloomGenerate:
                 traceback.print_exc()
                 raise RuntimeError(f"Failed to generate music: {e}")
 
-
-class SongBloomDecoder:
-    """
-    Node to decode SongBloom latents to audio with chunked processing for memory efficiency
-    """
-    
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("VAE",),
-                "latent": ("LATENT",),
-            },
-            "optional": {
-                "chunk_size": ("INT", {"default": 1000, "min": 10, "max": 5000, "step": 10, 
-                                     "tooltip": "Number of latent frames to process at once. Lower values use less memory."}),
-                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after decoding"}),
-            }
-        }
-    
-    RETURN_TYPES = ("AUDIO",)
-    RETURN_NAMES = ("audio",)
-    FUNCTION = "decode"
-    CATEGORY = "audio/songbloom"
-    
-    def decode(self, model: Any, latent: Dict[str, torch.Tensor], 
-               chunk_size: int = 100, force_offload: bool = True):
-        """Decode latent representation to audio using chunked processing with ComfyUI model management"""
-        try:
-            # Clean up memory before processing
-            cleanup_memory()
-            
-            # Get devices
-            device, offload_device = get_devices()
-            
-            # model is a StableVAE instance
-            vae_model = model.to(device)  # No wrapping needed
-            model_sample_rate = 48000
-
-            # Get latent samples
-            latent_samples = latent["samples"]  # Shape: [batch, channels, time]
-
-            # Move to model device and dtype
-            vae_device = next(vae_model.parameters()).device
-            vae_dtype = next(vae_model.parameters()).dtype
-            latent_samples = latent_samples.to(device=vae_device, dtype=vae_dtype)
-
-            batch_size, channels, time_frames = latent_samples.shape
-
-            print(f"Decoding latent shape: {latent_samples.shape} using chunks of size {chunk_size}")
-
-            if time_frames <= chunk_size:
-                print("Sequence short enough, decoding without chunking")
-                with torch.no_grad():
-                    decoded_audio = vae_model.decode(latent_samples)
-            else:
-                decoded_chunks = []
-
-                for start_idx in range(0, time_frames, chunk_size):
-                    end_idx = min(start_idx + chunk_size, time_frames)
-                    print(f"Decoding chunk {start_idx}:{end_idx} ({end_idx - start_idx} frames)")
-                    chunk_latent = latent_samples[:, :, start_idx:end_idx]
-                    with torch.no_grad():
-                        chunk_audio = vae_model.decode(chunk_latent)
-                    decoded_chunks.append(chunk_audio)
-                    del chunk_audio
-
-                print(f"Concatenating {len(decoded_chunks)} decoded chunks")
-                decoded_audio = torch.cat(decoded_chunks, dim=-1)
-                del decoded_chunks
-
-            if decoded_audio.dim() == 2:
-                decoded_audio = decoded_audio.unsqueeze(0)  # Add batch dimension
-
-            decoded_audio = decoded_audio.float().cpu()
-            print(f"Final decoded audio shape: {decoded_audio.shape}")
-
-            output_audio = {
-                "waveform": decoded_audio,
-                "sample_rate": model_sample_rate
-            }
-
-            # Offload VAE if requested
-            if force_offload:
-                print("Offloading VAE to CPU after decoding")
-                vae_model.to(offload_device)
-
-            return (output_audio,)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"Failed to decode latent: {e}")
-
-
-class SongBloomVAEEncoder:
-    """
-    Node to encode audio to SongBloom latents using the VAE (with optional chunked processing)
-    """
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("VAE",),
-                "audio": ("AUDIO",),
-            },
-            "optional": {
-                "chunked": ("BOOLEAN", {"default": False, "tooltip": "Enable chunked encoding for long audio."}),
-                "chunk_size": ("INT", {"default": 1000, "min": 10, "max": 5000, "step": 10, "tooltip": "Chunk size in latent frames (only used if chunked)."}),
-                "overlap": ("INT", {"default": 0, "min": 0, "max": 500, "step": 1, "tooltip": "Overlap in latent frames (only used if chunked)."}),
-                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after encoding"}),
-            }
-        }
-
-    RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("latent",)
-    FUNCTION = "encode"
-    CATEGORY = "audio/songbloom"
-
-    def encode(self, model: Any, audio: dict, chunked: bool = False, chunk_size: int = 1000, overlap: int = 0, force_offload: bool = True):
-        try:
-            # Clean up memory before processing
-            cleanup_memory()
-            
-            # Get devices
-            device, offload_device = get_devices()
-            
-            vae_model = model.to(device)
-            waveform = audio["waveform"]  # [batch, channels, samples]
-            sample_rate = audio["sample_rate"]
-            # Resample to 48000Hz if needed
-            target_sr = 48000
-            if sample_rate != target_sr:
-                # waveform: [batch, channels, samples]
-                # Resample each batch separately
-                resampled = []
-                for w in waveform:
-                    resampled.append(torchaudio.functional.resample(w, sample_rate, target_sr))
-                # Pad/truncate to the same length
-                min_len = min(w.shape[-1] for w in resampled)
-                resampled = [w[..., :min_len] for w in resampled]
-                waveform = torch.stack(resampled, dim=0)
-                sample_rate = target_sr
-            # Move to model device and dtype
-            vae_device = next(vae_model.parameters()).device
-            vae_dtype = next(vae_model.parameters()).dtype
-            waveform = waveform.to(device=vae_device, dtype=vae_dtype)
-            # Use encode_audio for chunked, encode for non-chunked
-            if chunked:
-                latent = vae_model.vae.encode_audio(waveform, chunked=True, chunk_size=chunk_size, overlap=overlap)
-            else:
-                latent = vae_model.encode(waveform)
-            if isinstance(latent, tuple):
-                latent = latent[0]
-            if latent.dim() == 2:
-                latent = latent.unsqueeze(0)
-            output_latent = {"samples": latent.float().cpu()}
-            
-            # Offload VAE if requested
-            if force_offload:
-                print("Offloading VAE to CPU after encoding")
-                vae_model.to(offload_device)
-                
-            return (output_latent,)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"Failed to encode audio to latent: {e}")
-
-
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "SongBloomModelLoader": SongBloomModelLoader,
     "SongBloomGenerate": SongBloomGenerate,
-    "SongBloomDecoder": SongBloomDecoder,
-    "SongBloomVAEEncoder": SongBloomVAEEncoder,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SongBloomModelLoader": "SongBloom Model Loader",
-    "SongBloomGenerate": "SongBloom Generate",
-    "SongBloomDecoder": "SongBloom Decoder",
-    "SongBloomVAEEncoder": "SongBloom VAE Encoder",
+    "SongBloomGenerate": "SongBloom Generate Audio",
 }
