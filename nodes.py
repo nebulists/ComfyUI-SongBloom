@@ -382,8 +382,24 @@ class SongBloomGenerate:
             with torch.no_grad():
                 latent_seq, token_seq = songbloom_model.diffusion.generate(None, attributes, **generation_params)
                 
+                # Offload diffusion model to CPU to free VRAM for decoding
+                print("Offloading diffusion model to CPU to free VRAM for decoding")
+                if hasattr(songbloom_model, 'diffusion'):
+                    songbloom_model.diffusion.to(offload_device)
+                
+                # Force garbage collection and memory cleanup
+                if mm is not None:
+                    mm.soft_empty_cache()
+                else:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+                if mm is not None:
+                    debug_memory_usage(device)
+                
                 # Get the compression model for decoding
-                vae_model = songbloom_model.compression_model
+                vae_model = songbloom_model.compression_model.to(device)
                 
                 # Get latent samples and move to model device and dtype
                 if latent_seq.dim() == 2:
