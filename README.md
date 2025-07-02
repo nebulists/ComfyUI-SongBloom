@@ -3,7 +3,7 @@
 Compatible tags:
 [verse] [chorus] [bridge] [intro] [outro] [inst] [silence]
 
-![Image](https://github.com/user-attachments/assets/5d91b6ec-a2df-42fc-bf54-45eb879cb55c)
+![image](https://github.com/user-attachments/assets/b2de9e04-edcf-45ca-a76c-4f51fc151a12)
 
 ## Installation
 1. Clone the repository to your custom_nodes folder:
@@ -22,6 +22,8 @@ OR if you want to use Chinese!
 
 # Safetensor files
 https://huggingface.co/fredconex/SongBloom-safetensors/tree/main
+
+https://github.com/user-attachments/assets/feffbebf-2cd6-4ab9-8ca6-ea77164ccca7
 
 
 Credits / Original Repo:  
