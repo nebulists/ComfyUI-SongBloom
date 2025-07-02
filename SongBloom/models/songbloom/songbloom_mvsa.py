@@ -33,7 +33,7 @@ from ..musicgen.get_backend import get_backend
 
 from ..transformer import ContinuousTransformer as DiT_block
 from ..musicldm.musicldm_dit import FourierFeatures
-from ..musicldm.inference.sampling import get_alphas_sigmas, sample, sample_discrete_euler, sample_discrete_euler_with_temperature
+from ..musicldm.inference.sampling import get_alphas_sigmas, sample_discrete_euler_with_temperature, sample_discrete_euler_spiral, sample_discrete_euler_with_temperature_pingpong
 
 ConditionTensors = tp.Dict[str, ConditionType]
 CFGConditions = tp.Union[ConditionTensors, tp.Tuple[ConditionTensors, ConditionTensors]]
@@ -77,7 +77,7 @@ class MVSA_DiTAR(StreamingModule):
                  ):
         super().__init__()
 
-        self.condition_provider = get_conditioner_provider(condition_provider_cfg)
+        self.condition_provider = get_conditioner_provider(condition_provider_cfg).cpu()
         self.fuser = get_condition_fuser(fuser_cfg)
         
         self.dim = dim  
@@ -102,7 +102,6 @@ class MVSA_DiTAR(StreamingModule):
         if self.backend == 'llama':
             self.ar_transformer = get_backend('llama', 
                                         dim, num_heads, lm_layers, hidden_scale,init_std=init_std, rope_theta=rotary_base_val)
-            self.ar_transformer.gradient_checkpointing_enable()
         elif self.backend == 'bart':
             self.cross_encoder = get_backend('bart_enc',
                                         dim, num_heads, lm_layers // 4, hidden_scale,init_std=init_std)
@@ -154,7 +153,6 @@ class MVSA_DiTAR(StreamingModule):
             rotary_base_val = rotary_base_val,
             # init_std=init_std
         )
-        self.nar_dit.gradient_checkpointing_enable()
         
         self.diffusion_objective = diffusion_objective
         self.timestep_sampler = timestep_sampler
@@ -216,15 +214,7 @@ class MVSA_DiTAR(StreamingModule):
         h = torch.cat([hh[:hl] for hh, hl in zip(h_pad, block_num)], dim=0) 
         block_semantic = rearrange(sketch_emb, "b (n s) d -> b n s d", s=self.block_size) # B, N, 32, D 
         current_block_semantic = torch.cat([bb[:bl] for bb, bl in zip(block_semantic, block_num)], dim=0) 
-        
-        if self.training: # for CFG
-            drop_h_idx = torch.rand((h.shape[0], 1), device=h.device) < self.h_dropout
-            h = torch.masked_fill(h, drop_h_idx, 0)
-            # current_block_semantic = torch.masked_fill(current_block_semantic, drop_h_idx.unsqueeze(-1), 0)
-            
-            drop_s_idx = torch.rand((current_block_semantic.shape[0], 1), device=current_block_semantic.device) < self.h_dropout
-            current_block_semantic = torch.masked_fill(current_block_semantic, drop_s_idx.unsqueeze(-1), 0)
-        
+              
         with torch.no_grad():
             block_latent = rearrange(x_latent, "b d (n s) -> b n s d", s=self.block_size) # B, N, 32, D
             current_block = torch.cat([bb[:bl] for bb, bl in zip(block_latent, block_num)], dim=0) 
@@ -248,19 +238,14 @@ class MVSA_DiTAR(StreamingModule):
                     t = 1 - t
                     
                 # Calculate the noise schedule parameters for those timesteps
-                if self.diffusion_objective == "v":
-                    alphas, sigmas = get_alphas_sigmas(t)
-                elif self.diffusion_objective == "rectified_flow":
-                    alphas, sigmas = 1-t, t
+                alphas, sigmas = 1-t, t
+
                 # Combine the ground truth data and the noise
                 alphas = alphas[:, None, None]
                 sigmas = sigmas[:, None, None]
                 noise = torch.randn_like(current_block)
                 noised_inputs = current_block * alphas + noise * sigmas
-                if self.diffusion_objective == "v": # (a_t - a_{t-1})x_0 + (b_t-b_{t-1}) e = -b x_0 + a e
-                    targets = noise * alphas - current_block * sigmas
-                elif self.diffusion_objective == "rectified_flow": #||(XT-X0) - p(x_t, t)||      
-                    targets = noise - current_block
+                targets = noise - current_block
     
         nar_output = self.diffusion_forward(noised_inputs.to(orig_type), t.to(orig_type), h, current_block_semantic, prev_block)
 
@@ -303,9 +288,6 @@ class MVSA_DiTAR(StreamingModule):
             out = out[:, -T:, :]
 
         return out
-
-
-
 
     def diffusion_forward(self, 
                 x: torch.Tensor,
@@ -365,7 +347,11 @@ class MVSA_DiTAR(StreamingModule):
                            diff_temp: float = 1.0, 
                            top_k: int = 0,
                            top_p: float = 0.0,
-                           penalty_token_pool: tp.Optional[list] = None) -> torch.Tensor:
+                           penalty_token_pool: tp.Optional[list] = None,
+                           sampler: str = 'discrete_euler',
+                           spiral_kwargs: dict = None,
+                           pingpong_kwargs: dict = None
+                           ) -> torch.Tensor:
         # infer: lm next_token -> (if % block_sz == 0) infer diff
         # 1. sample sketch (lm) -> 2. sample latent (lm+diff)
         sequence = sequence.clone()
@@ -468,15 +454,23 @@ class MVSA_DiTAR(StreamingModule):
                 h, _ = h.chunk(2, dim=0)      
                 semantic_embs = next_token_embs
 
-        
-        if self.diffusion_objective == "v":
-            next_latent = sample(self.diffusion_forward, noise, steps=steps, eta=0, h=h, s=semantic_embs, history_x=prev_latents, 
-                                 cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
-        elif self.diffusion_objective == "rectified_flow":
-            # next_latent = sample_discrete_euler(self.diffusion_forward, noise, steps=steps, h=h, s=semantic_embs, history_x=prev_latents, 
-            #                                     cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
-            next_latent = sample_discrete_euler_with_temperature(self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
-                                                cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
+            # Sampler selection
+            if sampler == 'discrete_euler':
+                next_latent = sample_discrete_euler_with_temperature(
+                    self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
+                    cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None))
+            elif sampler == 'spiral':
+                spiral_args = spiral_kwargs or {}
+                next_latent = sample_discrete_euler_spiral(
+                    self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
+                    cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None), **spiral_args)
+            elif sampler == 'pingpong':
+                pingpong_args = pingpong_kwargs or {}
+                next_latent = sample_discrete_euler_with_temperature_pingpong(
+                    self.diffusion_forward, noise, steps=steps, temperature=diff_temp, h=h, s=semantic_embs, history_x=prev_latents, 
+                    cfg_coef=(cfg_coef_diff if dit_cfg_type=='h' else None), **pingpong_args)
+            else:
+                raise ValueError(f"Unknown sampler: {sampler}")
         if condition_tensors and dit_cfg_type == 'global':
             cond_next_latent, uncond_next_latent = torch.chunk(next_latent, 2, dim=0)
             next_latent = uncond_next_latent + (cond_next_latent - uncond_next_latent) * cfg_coef_diff
@@ -494,16 +488,20 @@ class MVSA_DiTAR(StreamingModule):
                  prompt: tp.Optional[torch.Tensor] = None,
                  conditions: tp.List[ConditioningAttributes] = [],
                  cfg_coef: tp.Optional[tp.Union[float, tp.List[float]]] = None,
-                 steps=50,
+                 steps=36,
                  dit_cfg_type: str = 'h',
                  max_frames: int = 1500, # 60 * 25
                  use_sampling: bool = True,
-                 temp: float = 1.0,
-                 diff_temp: float = 1.0,
-                 top_k: int = 0,
+                 temp: float = 0.9,
+                 diff_temp: float = 0.95,
+                 top_k: int = 100,
                  top_p: float = 0.0,
                  penalty_repeat: bool = False,
-                 penalty_window: int = 50) -> torch.Tensor: 
+                 penalty_window: int = 50,
+                 sampler: str = 'discrete_euler',
+                 spiral_kwargs: dict = None,
+                 pingpong_kwargs: dict = None
+                 ) -> torch.Tensor: 
         assert not self.training, "generation shouldn't be used in training mode."
 
         B = len(conditions)
@@ -513,18 +511,19 @@ class MVSA_DiTAR(StreamingModule):
         tokenized = self.condition_provider.tokenize(conditions)
         condition_tensors = self.condition_provider(tokenized)          
         
-        
         sequence = self.bos_token.reshape(1,1,-1).expand(B, 1, -1)
         if prompt is not None:
             # TODO 
             raise NotImplementedError
             # sequence = torch.cat([sequence, prompt])
 
-            
+                    
         prev_blocks = torch.zeros((B, self.block_size, self.latent_dim), device=sequence.device, dtype=sequence.dtype)
         latent_seq, token_seq = None, None
             
         max_tokens = max_frames
+
+        torch.cuda.empty_cache()
 
         with self.streaming():
             prog_bar = tqdm.tqdm()
@@ -536,11 +535,16 @@ class MVSA_DiTAR(StreamingModule):
                     penalty_token_pool = token_seq[: ,-penalty_window:]
                     if penalty_token_pool.shape[-1] < penalty_window:
                         penalty_token_pool = F.pad(penalty_token_pool, (penalty_window - penalty_token_pool.shape[-1], 0), value=self.eos_token_id)
-                next_tokens, next_latent, next_block_seq = self._sample_next_block(sequence[:, -1: ], prev_blocks, condition_tensors, 
-                                                                                   cfg_coef=cfg_coef, steps=steps, dit_cfg_type=dit_cfg_type,
-                                                                                    use_sampling=use_sampling, temp=temp, diff_temp=diff_temp,
-                                                                                    top_k=top_k, top_p=top_p,
-                                                                                    penalty_token_pool=penalty_token_pool)
+                next_tokens, next_latent, next_block_seq = self._sample_next_block(
+                    sequence[:, -1: ], prev_blocks, condition_tensors, 
+                    cfg_coef=cfg_coef, steps=steps, dit_cfg_type=dit_cfg_type,
+                    use_sampling=use_sampling, temp=temp, diff_temp=diff_temp,
+                    top_k=top_k, top_p=top_p,
+                    penalty_token_pool=penalty_token_pool,
+                    sampler=sampler,
+                    spiral_kwargs=spiral_kwargs,
+                    pingpong_kwargs=pingpong_kwargs
+                )
                 
                 if (next_tokens == self.eos_token_id).any() or sequence.shape[1] > max_frames  / self.block_size * (self.block_size+1):
                     break

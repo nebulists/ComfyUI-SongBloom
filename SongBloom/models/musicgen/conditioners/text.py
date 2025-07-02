@@ -1,11 +1,9 @@
 from .base import *
 
-import spacy
 import warnings
 import random
 import hashlib
 from transformers import RobertaTokenizer, T5EncoderModel, T5Tokenizer, AutoTokenizer, XLMRobertaModel, XLMRobertaTokenizer  # type: ignore
-from num2words import num2words
 
 def hash_trick(word: str, vocab_size: int) -> int:
     """Hash trick to pair each word with an index

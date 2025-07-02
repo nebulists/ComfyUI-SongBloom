@@ -1,4 +1,3 @@
-
 from functools import partial
 import typing as tp
 import torch
@@ -10,8 +9,8 @@ import random
 from omegaconf import OmegaConf
 import copy
 import lightning as pl
-
 import os, sys
+from safetensors.torch import load_file as safetensors_load_file
 
 from ..musicgen.conditioners import WavCondition, JointEmbedCondition, ConditioningAttributes
 from ..vae_frontend import StableVAE
@@ -23,22 +22,18 @@ os.environ['TOKENIZERS_PARALLELISM'] = "false"
 
 
 class SongBloom_PL(pl.LightningModule):
-    def __init__(self, cfg):
+    def __init__(self, cfg, vae):
         super().__init__()
         # 关闭自动优化
         # self.automatic_optimization = False
 
         self.cfg = cfg
-
-        # Build VAE
-        self.vae = StableVAE(**cfg.vae).eval()
+        self.vae = vae
         assert self.cfg.model['latent_dim'] == self.vae.channel_dim
 
-            
         self.save_hyperparameters(cfg)
-        if self.vae is not None:
-            for param in self.vae.parameters():
-                param.requires_grad = False
+        for param in self.vae.parameters():
+            param.requires_grad = False
                 
         # Build DiT
         model_cfg = OmegaConf.to_container(copy.deepcopy(cfg.model), resolve=True)
@@ -50,11 +45,6 @@ class SongBloom_PL(pl.LightningModule):
         
         self.model = MVSA_DiTAR(**model_cfg)
         # print(self.model)
-        
-
-
-
-
 
 ####################################
 
@@ -65,7 +55,10 @@ class SongBloom_Sampler:
         self.compression_model = compression_model
         self.diffusion = diffusion
         self.lyric_processor_key = lyric_processor_key
-        self.lyric_processor = key2processor.get(lyric_processor_key) if lyric_processor_key is not None else lambda x: x
+        if lyric_processor_key == 'pinyin':
+            self.lyric_processor = key2processor.get(lyric_processor_key)() if lyric_processor_key is not None else lambda x: x
+        else:
+            self.lyric_processor = key2processor.get(lyric_processor_key) if lyric_processor_key is not None else lambda x: x
         # import pdb; pdb.set_trace()
 
         assert max_duration is not None
@@ -81,22 +74,41 @@ class SongBloom_Sampler:
         self._progress_callback: tp.Optional[tp.Callable[[int, int], None]] = None
 
     @classmethod
-    def build_from_trainer(cls, cfg, strict=True, dtype=torch.float32):
-        model_light = SongBloom_PL(cfg)
-        incompatible = model_light.load_state_dict(torch.load(cfg.pretrained_path, map_location='cpu'), strict=strict)
+    def build_from_trainer(cls, cfg, strict=True, dtype=torch.float32, safetensor_path=None):
+        from ..vae_frontend import StableVAE
+        import json
+        import os
+        
+        # Load VAE config
+        config_dir = os.path.join(os.path.dirname(__file__), "..", "..", "config")
+        vae_cfg_path = os.path.join(config_dir, "stable_audio_1920_vae.json")
+        
+        # Create VAE using StableVAE (without loading weights initially)
+        vae = StableVAE(vae_ckpt=None, vae_cfg=vae_cfg_path, sr=48000)
+        
+        # Create the model with the VAE
+        model_light = SongBloom_PL(cfg, vae)
+        
+        # Load the checkpoint - this will load both VAE and diffusion model weights
+        if safetensor_path is not None:
+            print(f"Loading weights from safetensor: {safetensor_path}")
+            state_dict = safetensors_load_file(safetensor_path, device='cpu')
+        else:
+            state_dict = torch.load(cfg.pretrained_path, map_location='cpu')
+        
+        # Load the state dict - this will include the VAE weights
+        incompatible = model_light.load_state_dict(state_dict, strict=strict)
+        print(f"Incompatible keys: {incompatible}")
         
         lyric_processor_key = cfg.train_dataset.lyric_processor
-    
-        print(incompatible)
         
-        model_light = model_light.eval().cuda().to(dtype=dtype)  
+        model_light = model_light.eval().cuda().to(dtype=dtype)
         model = cls(
             compression_model = model_light.vae,
             diffusion = model_light.model,
             lyric_processor_key = lyric_processor_key,
             max_duration = cfg.max_dur,
             prompt_duration = cfg.sr * cfg.train_dataset.prompt_len
-            
         )
         model.set_generation_params(**cfg.inference)
         return model
