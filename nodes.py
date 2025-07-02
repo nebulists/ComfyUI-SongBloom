@@ -132,6 +132,7 @@ class SongBloomModelLoader:
             "required": {
                 "checkpoint": (safetensor_files, {"default": safetensor_files[0], "tooltip": "Pick a .safetensors checkpoint from models/checkpoints."}),
                 "dtype": (["float32", "bfloat16"], {"default": "bfloat16"}),
+                "audio_len": ("INT", {"default": 10, "min": 1, "max": 45, "step": 1}),
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after loading"}),
@@ -155,7 +156,7 @@ class SongBloomModelLoader:
         raw_cfg = OmegaConf.load(open(cfg_file, 'r'))
         return raw_cfg
     
-    def load_model(self, dtype: str, checkpoint: str, force_offload: bool = True, **kwargs):
+    def load_model(self, dtype: str, checkpoint: str, audio_len: int = 10, force_offload: bool = True, **kwargs):
         try:
             # Clean up memory before loading
             cleanup_memory()
@@ -203,7 +204,7 @@ class SongBloomModelLoader:
             
             print(f"Loading new model with dtype: {dtype}")
             model = SongBloom_Sampler.build_from_trainer(cfg, strict=True, dtype=torch_dtype, safetensor_path=safetensor_path)
-            model.prompt_duration = cfg.sr * 10
+            model.prompt_duration = cfg.sr * audio_len
             if hasattr(cfg, 'inference') and cfg.inference:
                 model.set_generation_params(**cfg.inference)
             
@@ -217,7 +218,7 @@ class SongBloomModelLoader:
                 "g2p_path": g2p_path,
                 "safetensor_path": safetensor_path,
                 "dtype": dtype,
-                "prompt_len": 10,
+                "prompt_len": audio_len,
                 "device": device,
                 "offload_device": offload_device
             }
@@ -262,12 +263,12 @@ class SongBloomGenerate:
                 "diff_temp": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.5, "step": 0.01}),
                 "steps": ("INT", {"default": 36, "min": 1, "max": 200, "step": 1}),
                 "use_sampling": ("BOOLEAN", {"default": True}),
+                "sampler": (["discrete_euler", "spiral", "pingpong"], {"default": "discrete_euler", "tooltip": "Choose the sampler: discrete_euler (default), spiral, or pingpong."}),
                 "dit_cfg_type": (["h", "global"], {"default": "h"}),
                 "top_k": ("INT", {"default": 100, "min": 1, "max": 1000, "step": 1}),
                 "max_duration": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 250.0, "step": 1.0}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2**32-1}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Force model offloading to CPU after generation"}),
-                "sampler": (["discrete_euler", "spiral", "pingpong"], {"default": "discrete_euler", "tooltip": "Choose the sampler: discrete_euler (default), spiral, or pingpong."}),
             }
         }
     

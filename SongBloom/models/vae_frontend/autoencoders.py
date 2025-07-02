@@ -7,9 +7,17 @@ import numpy as np
 from torch import nn
 from torch.nn import functional as F
 from torchaudio import transforms as T
-from dac.nn.layers import WNConv1d, WNConvTranspose1d
+from torch.nn.utils import weight_norm
 from typing import Literal, Dict, Any
 import os,sys
+
+
+def WNConv1d(*args, **kwargs):
+    return weight_norm(nn.Conv1d(*args, **kwargs))
+
+
+def WNConvTranspose1d(*args, **kwargs):
+    return weight_norm(nn.ConvTranspose1d(*args, **kwargs))
 
 sys.path.insert(0, os.path.dirname(__file__))
 from bottleneck import create_bottleneck_from_config
