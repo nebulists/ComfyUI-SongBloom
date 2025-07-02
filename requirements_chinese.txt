@@ -11,5 +11,4 @@ torch
 torchaudio
 transformers
 einops
-vector_quantize_pytorch
 safetensors

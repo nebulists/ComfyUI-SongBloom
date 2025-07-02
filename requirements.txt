@@ -4,7 +4,6 @@ transformers
 safetensors
 einops
 omegaconf
-vector_quantize_pytorch
 lightning
 wordsegment
 g2p-en
