@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from einops import rearrange
 import tqdm
-from comfy.utils import ProgressBar
+# from comfy.utils import ProgressBar
 
 from ..base.utils import create_norm_fn
 from ..base.sample import sample_top_k, sample_top_p, multinomial
@@ -527,7 +527,7 @@ class MVSA_DiTAR(StreamingModule):
 
         with self.streaming():
             prog_bar = tqdm.tqdm()
-            comfyui_pbar = ProgressBar(max_tokens)
+            # comfyui_pbar = ProgressBar(max_tokens)
             while True:
                 if token_seq is None or not penalty_repeat:
                     penalty_token_pool = None
@@ -555,7 +555,7 @@ class MVSA_DiTAR(StreamingModule):
                 prev_blocks = next_latent
                 
                 prog_bar.update(self.block_size)
-                comfyui_pbar.update(self.block_size)
+                # comfyui_pbar.update(self.block_size)
                 
                 
         if latent_seq is None:

@@ -6,21 +6,13 @@ import gc
 import torchaudio
 import json
 import tqdm
-from comfy.utils import ProgressBar
 import numpy as np
 from typing import Tuple, Dict, Any, Optional
-import folder_paths
 from omegaconf import OmegaConf, DictConfig
 
-# Import ComfyUI model management and interruption exception
-try:
-    import comfy.model_management as mm
-    from comfy.model_management import InterruptProcessingException
-except ImportError:
-    # Fallback if not available
-    print("Warning: ComfyUI model management not available, using fallback")
-    InterruptProcessingException = Exception
-    mm = None
+
+InterruptProcessingException = Exception
+mm = None
 
 # Disable flash attention for compatibility
 os.environ['DISABLE_FLASH_ATTN'] = "1"
@@ -28,6 +20,9 @@ model_name = "songbloom_full_150s"
 
 # Global flag to track if resolvers are registered
 _RESOLVERS_REGISTERED = False
+
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+
 
 def register_omegaconf_resolvers(cache_dir: str):
     """Register OmegaConf resolvers globally to avoid conflicts"""
@@ -62,7 +57,7 @@ def register_omegaconf_resolvers(cache_dir: str):
     _RESOLVERS_REGISTERED = True
 
 try:
-    from .SongBloom.models.songbloom.songbloom_pl import SongBloom_Sampler
+    from SongBloom.models.songbloom.songbloom_pl import SongBloom_Sampler
     _SONGBLOOM_IMPORT_ERROR = None
 except ImportError as e:
     print(f"Warning: Could not import SongBloom: {e}")
@@ -119,7 +114,7 @@ class SongBloomModelLoader:
     @staticmethod
     def _list_safetensors():
         """List available .safetensors files in the checkpoints directory."""
-        checkpoints_dir = os.path.join(folder_paths.models_dir, "checkpoints")
+        checkpoints_dir = os.path.join(MODELS_DIR, "checkpoints")
         if not os.path.exists(checkpoints_dir):
             return []
         return [f for f in os.listdir(checkpoints_dir) if f.endswith('.safetensors')]
@@ -145,7 +140,7 @@ class SongBloomModelLoader:
     CATEGORY = "audio/songbloom"
     
     def __init__(self):
-        self.cache_dir = os.path.join(folder_paths.models_dir , "songbloom")
+        self.cache_dir = os.path.join(MODELS_DIR, "songbloom")
         os.makedirs(self.cache_dir, exist_ok=True)
         # Set config directory for resolvers
         self.config_dir = os.path.join(os.path.dirname(__file__), "SongBloom", "config")
@@ -175,7 +170,7 @@ class SongBloomModelLoader:
             cfg_path = os.path.join(self.config_dir, f"{model_name}.yaml")
             vae_cfg_path = os.path.join(self.config_dir, "stable_audio_1920_vae.json")
             g2p_path = os.path.join(self.config_dir, "vocab_g2p.yaml")
-            model_safetensor = os.path.join(folder_paths.models_dir, "checkpoints", checkpoint)
+            model_safetensor = os.path.join(MODELS_DIR, "checkpoints", checkpoint)
             safetensor_path = model_safetensor
             
             # Verify model file exists
